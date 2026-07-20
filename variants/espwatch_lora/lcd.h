@@ -3,14 +3,13 @@
 //#include "sys.h"	 
 
 #include <Arduino.h>
-#include "variant.h"
 #include "stdlib.h"
 #include <SPI.h>
 #include "soc/gpio_struct.h"
 #include "soc/io_mux_reg.h"
 
 // LCD SPI controller — defined in lcd.cpp, shared with ESPWatchTFT.h
-extern SPIClass lcdSPI;
+extern SPIClass* lcdSPI;
 
 #define u8  char
 #define u16 int
@@ -64,7 +63,7 @@ extern u16  BACK_COLOR;
 #ifdef ST7789_CS
 #define LCD_CS   ST7789_CS
 #else
-#define LCD_CS   7
+#define LCD_CS   18
 #endif
 #endif
 
@@ -88,7 +87,7 @@ extern u16  BACK_COLOR;
 #ifdef ST7789_MISO
 #define VSPI_MISO ST7789_MISO
 #else
-#define VSPI_MISO 37
+#define VSPI_MISO -1
 #endif
 #endif
 
@@ -96,7 +95,7 @@ extern u16  BACK_COLOR;
 #ifdef ST7789_SDA
 #define VSPI_MOSI ST7789_SDA
 #else
-#define VSPI_MOSI 6
+#define VSPI_MOSI 17
 #endif
 #endif
 
@@ -104,7 +103,7 @@ extern u16  BACK_COLOR;
 #ifdef ST7789_SCK
 #define VSPI_SCLK ST7789_SCK
 #else
-#define VSPI_SCLK 5
+#define VSPI_SCLK 16
 #endif
 #endif
 

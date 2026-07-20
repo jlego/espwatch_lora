@@ -66,12 +66,18 @@ public:
   }
 
   void enterDeepSleep(uint32_t secs, int pin_wake_btn) {
-    // Configure deep sleep with LoRa interrupt wake
-    esp_sleep_enable_ext1_wakeup((1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
-    
-    if (pin_wake_btn >= 0) {
-      esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn) | (1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
-    }
+    // Configure deep sleep wake sources
+    // If LoRa DIO1 pin is not connected, don't use it as wake source
+    #if P_LORA_DIO_1 != RADIOLIB_NC
+      esp_sleep_enable_ext1_wakeup((1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
+      if (pin_wake_btn >= 0) {
+        esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn) | (1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
+      }
+    #else
+      if (pin_wake_btn >= 0) {
+        esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);
+      }
+    #endif
     
     if (secs > 0) {
       esp_sleep_enable_timer_wakeup(secs * 1000000ULL);
