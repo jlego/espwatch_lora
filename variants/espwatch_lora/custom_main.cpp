@@ -58,6 +58,8 @@ void setup() {
 
 #ifdef CUSTOM_BOARD
   draw_startup_screen();
+  user_btn.begin();
+  user_btn2.begin();
 #endif
 
   if (!radio_init()) {
@@ -140,37 +142,32 @@ void draw_header(const char* title) {
 }
 
 void draw_tab_bar() {
-    // 底部 tab bar (0, 258, 240, 27) - 仅非设置页显示
+    // 底部 tab bar (0, 258, 240, 27) - 所有页面显示
     int bar_y = 258;
     display.setColor(DisplayDriver::LIGHT);
     display.drawRect(0, bar_y, 240, 27);
 
-    display.setTextSize(2);
+    display.setTextSize(1);
 
-    // Contacts tab (0-120)
-    if (_menu_state == MenuScreen::CONTACTS) {
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(0, bar_y, 120, 27);
-        display.setColor(DisplayDriver::DARK);
-        display.setCursor(13, bar_y + 7);
-        display.print("Contacts");
-    } else {
-        display.setColor(DisplayDriver::LIGHT);
-        display.setCursor(13, bar_y + 7);
-        display.print("Contacts");
-    }
+    // 4个tab，每个60像素宽
+    const int TAB_W = 60;
+    const char* tab_names[] = {"Contacts", "Channels", "Chat", "Settings"};
+    MenuScreen tab_states[] = {MenuScreen::CONTACTS, MenuScreen::CHANNELS, MenuScreen::CHAT, MenuScreen::SETTINGS};
 
-    // Channels tab (120-240)
-    if (_menu_state == MenuScreen::CHANNELS) {
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(120, bar_y, 120, 27);
-        display.setColor(DisplayDriver::DARK);
-        display.setCursor(133, bar_y + 7);
-        display.print("Channels");
-    } else {
-        display.setColor(DisplayDriver::LIGHT);
-        display.setCursor(133, bar_y + 7);
-        display.print("Channels");
+    for (int i = 0; i < 4; i++) {
+        int tab_x = i * TAB_W;
+        if (_menu_state == tab_states[i]) {
+            display.setColor(DisplayDriver::LIGHT);
+            display.fillRect(tab_x, bar_y, TAB_W, 27);
+            display.setColor(DisplayDriver::DARK);
+        } else {
+            display.setColor(DisplayDriver::LIGHT);
+        }
+        // 居中文字
+        int text_len = strlen(tab_names[i]);
+        int cursor_x = tab_x + (TAB_W - text_len * 6) / 2;
+        display.setCursor(cursor_x, bar_y + 9);
+        display.print(tab_names[i]);
     }
 }
 
@@ -205,8 +202,8 @@ void render_contacts() {
     // 标题栏
     draw_header("Contacts");
 
-    // 列表区 (y: 30 ~ 256)，每一行高 28，可显示 8 行
-    const int MAX_VISIBLE = 8;
+    // 列表区 (y: 30 ~ 256)，每一行高 28，可显示 7 行（底部栏在258）
+    const int MAX_VISIBLE = 7;
     const int ITEM_H = 28;
     int y_start = 32;
 
@@ -230,10 +227,6 @@ void render_contacts() {
         int y = y_start + 18 + i * ITEM_H;
         ContactInfo contact;
         if (!the_mesh.getContactByIdx(idx, contact)) continue;
-
-        // 选中/未选中框
-        display.setColor(DisplayDriver::LIGHT);
-        display.drawRect(4, y, 232, ITEM_H - 2);
 
         display.setTextSize(1);
         display.setColor(DisplayDriver::LIGHT);
@@ -293,9 +286,6 @@ void render_channels() {
 
         int y = y_start + i * ITEM_H;
 
-        display.setColor(DisplayDriver::LIGHT);
-        display.drawRect(4, y, 232, ITEM_H - 2);
-
         display.setTextSize(2);
         display.setCursor(10, y + 7);
         display.print(channels[idx]);
@@ -303,6 +293,10 @@ void render_channels() {
         // 指示点（黄色）
         display.setColor(DisplayDriver::YELLOW);
         display.fillRect(220, y + 11, 6, 6);
+
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(4, y + ITEM_H - 2, 232, 1);
     }
 
     // 频道说明
@@ -343,6 +337,9 @@ void render_chat() {
     display.setCursor(14, y + 18);
     snprintf(buf, sizeof(buf), "Node: %s", the_mesh.getNodeName());
     display.print(buf);
+    // 白色下边线
+    display.setColor(DisplayDriver::LIGHT);
+    display.fillRect(8, y + BUBBLE_H, 224, 1);
 
     // 气泡 2：在线节点
     if (num_contacts > 0) {
@@ -353,6 +350,9 @@ void render_chat() {
         display.setCursor(14, y + 6);
         snprintf(buf, sizeof(buf), "Network: %d peers online", num_contacts);
         display.print(buf);
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(8, y + BUBBLE_H, 224, 1);
     } else {
         y += BUBBLE_H + 3;
         display.setColor(DisplayDriver::YELLOW);
@@ -360,6 +360,9 @@ void render_chat() {
         display.setColor(DisplayDriver::DARK);
         display.setCursor(14, y + 6);
         display.print("No contacts yet");
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(8, y + BUBBLE_H, 224, 1);
     }
 
     // 气泡 3：运行时间
@@ -373,6 +376,8 @@ void render_chat() {
     display.setCursor(14, y + 18);
     snprintf(buf, sizeof(buf), "Msg queue: %d pending", (int)the_mesh.getNumContacts());
     display.print(buf);
+    // 白色下边线
+    display.fillRect(8, y + BUBBLE_H, 224, 1);
 
     // 气泡 4：节点列表（如果有）
     if (num_contacts > 0) {
@@ -393,6 +398,9 @@ void render_chat() {
             snprintf(buf, sizeof(buf), "Seen: %us ago", (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
             display.print(buf);
         }
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(8, y + BUBBLE_H, 224, 1);
     }
 }
 
@@ -411,29 +419,27 @@ void render_settings_main_menu() {
     int y_start = 40;
 
     // 限制滚动
-    if (_settings_menu_idx > max(0, num_cats - 7))
-        _settings_menu_idx = max(0, num_cats - 7);
+    if (_settings_menu_idx >= num_cats)
+        _settings_menu_idx = num_cats - 1;
     if (_settings_menu_idx < 0) _settings_menu_idx = 0;
 
-    for (int i = 0; i < 7; i++) {
-        int idx = _settings_menu_idx + i;
-        if (idx >= num_cats) break;
-
+    for (int i = 0; i < num_cats; i++) {
         int y = y_start + i * ITEM_H;
 
         // 选中框（当前选中的高亮）
-        if (idx == _settings_menu_idx && _settings_selected) {
+        if (i == _settings_menu_idx) {
             display.setColor(DisplayDriver::BLUE);
             display.fillRect(4, y, 232, ITEM_H - 2);
             display.setColor(DisplayDriver::LIGHT);
-        } else {
-            display.setColor(DisplayDriver::LIGHT);
-            display.drawRect(4, y, 232, ITEM_H - 2);
         }
 
         display.setTextSize(2);
         display.setCursor(10, y + 7);
-        display.print(categories[idx]);
+        display.print(categories[i]);
+
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(4, y + ITEM_H - 2, 232, 1);
     }
 }
 
@@ -444,8 +450,6 @@ void render_settings_public_info() {
     int y = 40;
 
     // 用户名
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Name");
@@ -455,8 +459,6 @@ void render_settings_public_info() {
 
     // BLE PIN
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("BLE PIN");
@@ -464,6 +466,10 @@ void render_settings_public_info() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%d", (int)BLE_PIN_CODE);
     display.print(buf);
+
+    // 白色下边线
+    display.setColor(DisplayDriver::LIGHT);
+    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_radio_setup() {
@@ -473,8 +479,6 @@ void render_settings_radio_setup() {
     int y = 40;
 
     // Frequency
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Frequency");
@@ -485,8 +489,6 @@ void render_settings_radio_setup() {
 
     // Spreading Factor
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Spreading Factor");
@@ -497,8 +499,6 @@ void render_settings_radio_setup() {
 
     // Bandwidth
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Bandwidth");
@@ -509,8 +509,6 @@ void render_settings_radio_setup() {
 
     // TX Power
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("TX Power");
@@ -525,8 +523,6 @@ void render_settings_theme() {
 
     int y = 40;
 
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Backlight");
@@ -535,8 +531,6 @@ void render_settings_theme() {
     display.print("5%");
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Main Color");
@@ -546,8 +540,6 @@ void render_settings_theme() {
     display.print("BLUE");
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Screen Timeout");
@@ -555,6 +547,10 @@ void render_settings_theme() {
     display.setColor(DisplayDriver::LIGHT);
     display.setCursor(10, y + 18);
     display.print("Never");
+
+    // 白色下边线
+    display.setColor(DisplayDriver::LIGHT);
+    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_other() {
@@ -562,8 +558,6 @@ void render_settings_other() {
 
     int y = 40;
 
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Screen Timeout");
@@ -572,8 +566,6 @@ void render_settings_other() {
     display.print("Never");
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Battery");
@@ -582,8 +574,6 @@ void render_settings_other() {
     display.print("OK");
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Factory Reset");
@@ -591,6 +581,10 @@ void render_settings_other() {
     display.setColor(DisplayDriver::RED);
     display.setCursor(10, y + 18);
     display.print("Hold to reset");
+
+    // 白色下边线
+    display.setColor(DisplayDriver::LIGHT);
+    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_device_info() {
@@ -599,8 +593,6 @@ void render_settings_device_info() {
 
     int y = 40;
 
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Node Name");
@@ -609,8 +601,6 @@ void render_settings_device_info() {
     display.print(the_mesh.getNodeName());
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Firmware");
@@ -620,8 +610,6 @@ void render_settings_device_info() {
     display.print(buf);
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Radio");
@@ -631,8 +619,6 @@ void render_settings_device_info() {
     display.print(buf);
 
     y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(4, y, 232, 28);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Uptime");
@@ -640,6 +626,10 @@ void render_settings_device_info() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%ldmin", rtc_clock.getCurrentTime() / 60);
     display.print(buf);
+
+    // 白色下边线
+    display.setColor(DisplayDriver::LIGHT);
+    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings() {
@@ -692,10 +682,8 @@ void draw_status_screen() {
             break;
     }
 
-    // 底部栏
-    if (_menu_state == MenuScreen::CONTACTS || _menu_state == MenuScreen::CHANNELS) {
-        draw_tab_bar();
-    }
+    // 底部栏 - 所有页面都显示tab bar
+    draw_tab_bar();
 
     display.endFrame();
     Serial.printf("[UI] Render total: %lums\n", millis() - t0);
@@ -724,6 +712,7 @@ void loop() {
         // 设置主菜单：向下滚动选中项
         const int num_cats = 5;
         _settings_menu_idx = (_settings_menu_idx + 1) % num_cats;
+        Serial.printf("[UI] G45: Settings menu idx=%d\n", _settings_menu_idx);
     } else if (_menu_state == MenuScreen::CONTACTS) {
         // Contacts 页：切到 Channels
         _menu_state = MenuScreen::CHANNELS;
@@ -735,6 +724,37 @@ void loop() {
         // 设置子分类：切到下一个主页面（Contacts）
         _settings_selected = false;
         _menu_state = MenuScreen::CONTACTS;
+    }
+
+    draw_status_screen();
+    next_refresh = now + 60000;
+  }
+
+  // --- G0 长按（返回上一级）- 必须在 CLICK 之前处理 ---
+  if (btn_g0 == BUTTON_EVENT_LONG_PRESS) {
+    board.beep(200, 1000);
+    user_btn.cancelClick();  // 阻止松开时触发 CLICK
+
+    if (_menu_state == MenuScreen::SETTINGS && _settings_selected) {
+        // 设置子分类：返回主菜单
+        _settings_selected = false;
+        Serial.println("[UI] G0 long press: Back to settings main");
+    } else if (_menu_state == MenuScreen::SETTINGS) {
+        // 设置主菜单：返回 Chat
+        _menu_state = MenuScreen::CHAT;
+        Serial.println("[UI] G0 long press: Back to Chat");
+    } else if (_menu_state == MenuScreen::CHAT) {
+        // Chat：返回 Channels
+        _menu_state = MenuScreen::CHANNELS;
+        Serial.println("[UI] G0 long press: Back to Channels");
+    } else if (_menu_state == MenuScreen::CHANNELS) {
+        // Channels：返回 Contacts
+        _menu_state = MenuScreen::CONTACTS;
+        Serial.println("[UI] G0 long press: Back to Contacts");
+    } else if (_menu_state == MenuScreen::CONTACTS) {
+        // Contacts：循环到 Settings
+        _menu_state = MenuScreen::SETTINGS;
+        Serial.println("[UI] G0 long press: Back to Settings");
     }
 
     draw_status_screen();
