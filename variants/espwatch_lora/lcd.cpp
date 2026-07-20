@@ -118,11 +118,20 @@ void LCD_RESET(void) {
 #endif
 }
 
-// Backlight: turn on at high brightness
+// Backlight: use LEDC PWM for 5% brightness (very dim)
+// ESP32-S3 LEDC: channel 0, 5 kHz, 8-bit resolution. Duty 13 ≈ 5% of 255.
 void LCD_BacklightInit(void) {
 #if LCD_LED != -1
-    digitalWrite(LCD_LED, HIGH);
-    Serial.printf("[LCD] Backlight enabled on GPIO%d\n", LCD_LED);
+    const int LEDC_CH = 0;
+    const int LEDC_FREQ = 5000;
+    const int LEDC_RES = 8;        // 0–255
+    const int DUTY_5_PCT = 13;     // 5% of 255 ≈ 12.75, rounded to 13
+
+    ledcSetup(LEDC_CH, LEDC_FREQ, LEDC_RES);
+    ledcAttachPin(LCD_LED, LEDC_CH);
+    ledcWrite(LEDC_CH, DUTY_5_PCT);
+    Serial.printf("[LCD] Backlight 5%% on GPIO%d (LEDC ch=%d, duty=%d)\n",
+                  LCD_LED, LEDC_CH, DUTY_5_PCT);
 #endif
 }
 
@@ -256,21 +265,20 @@ void LCD_set_direction(u8 lcd_direction) {
     lcddev.setycmd = 0x2B;
     lcddev.wramcmd = 0x2C;
     lcddev.dir = lcd_direction % 4;
-    // 240x285 is likely a 240x320 ST7789 panel with top/bottom rows cropped.
-    // y-offset = (320-285)/2 = 17.5, rounded to 20 for common panel layouts.
-    const u16 PANEL_Y_OFFSET = 20;
+    // No offset: panel driver is calibrated for native 240x285 area.
+    const u16 PANEL_OFFSET = 0;
     switch (lcddev.dir) {
         case 0:
             lcddev.width = LCD_W;
             lcddev.height = LCD_H;
             lcddev.xoffset = 0;
-            lcddev.yoffset = PANEL_Y_OFFSET;
+            lcddev.yoffset = PANEL_OFFSET;
             LCD_WriteReg(0x36, 0);
             break;
         case 1:
             lcddev.width = LCD_H;
             lcddev.height = LCD_W;
-            lcddev.xoffset = PANEL_Y_OFFSET;
+            lcddev.xoffset = PANEL_OFFSET;
             lcddev.yoffset = 0;
             LCD_WriteReg(0x36, (1 << 6) | (1 << 5));
             break;
@@ -278,13 +286,13 @@ void LCD_set_direction(u8 lcd_direction) {
             lcddev.width = LCD_W;
             lcddev.height = LCD_H;
             lcddev.xoffset = 0;
-            lcddev.yoffset = PANEL_Y_OFFSET;
+            lcddev.yoffset = PANEL_OFFSET;
             LCD_WriteReg(0x36, (1 << 6) | (1 << 7));
             break;
         case 3:
             lcddev.width = LCD_H;
             lcddev.height = LCD_W;
-            lcddev.xoffset = PANEL_Y_OFFSET;
+            lcddev.xoffset = PANEL_OFFSET;
             lcddev.yoffset = 0;
             LCD_WriteReg(0x36, (1 << 7) | (1 << 5));
             break;
