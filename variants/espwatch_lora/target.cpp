@@ -320,7 +320,7 @@ bool radio_init() {
 
   // ============================================================
   // [1] Probe BUSY pin BEFORE touching SPI - this is the key
-  //     RadioLib error -707 = ERR_INVALID_BUSY_PIN
+  //     RadioLib error -707 = RADIOLIB_ERR_SPI_CMD_FAILED
   // ============================================================
   Serial.printf("[LoRa] Probing BUSY pin (GPIO%d)...\n", P_LORA_BUSY);
   pinMode(P_LORA_BUSY, INPUT);
@@ -431,10 +431,10 @@ bool radio_init() {
 
     if (status == 0xFF || status == 0x00) {
       Serial.println("[LoRa] SPI PROBLEM: 0x00 or 0xFF - MISO not connected, or chip dead, or BUSY stuck HIGH");
-    } else if ((status & 0x0F) == 0x0F) {
-      Serial.println("[LoRa] SPI OK - chip alive!");
+    } else if (cmd_status == 0x00) {
+      Serial.printf("[LoRa] SPI OK - chip alive (chip_mode=0x%02X, cmd_status=0x%02X)\n", chip_mode, cmd_status);
     } else {
-      Serial.printf("[LoRa] SPI partial response (0x%02X) - check wiring\n", status);
+      Serial.printf("[LoRa] chip reports cmd_status=0x%02X (non-zero - check wiring?)\n", cmd_status);
     }
   }
 
@@ -461,7 +461,8 @@ bool radio_init() {
 #ifdef SX1262_RADIO
     int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
 #elif defined(SX1268_RADIO)
-    int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x01, 0x01);
+    // SX1268: deviceSel MUST be 0x00 (not 0x01). 0x01 is for SX1262 only.
+    int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
 #endif
     if (pa_result == 0) {
       Serial.println("[LoRa] PA configured successfully");
