@@ -5,44 +5,52 @@
 #define u32 long
 #define SPI1 0
 
-// LCD uses its own SPIClass instance with custom pins (SCK=16, MOSI=17).
-// Default constructor picks the default SPI host (HSPI/SPI2 on ESP32-S3).
-// Pins are routed via GPIO Matrix, independent of LoRa's SPI on different pins.
-// CS is manually toggled to maintain 9-bit SPI alignment for ST7789.
+// LCD driver for ST7789-style display (9-bit SPI).
+// CS toggles between frames to reset ST7789's internal 9-bit counter.
+// beginTransaction is called ONCE in LCD_GPIOInit and never again -
+// this matches the "working reference" pattern and is sufficient because:
+// 1. LCD is the only device actively using this SPIClass instance
+// 2. LoRa uses its own SPIClass instance (different pins, different CS)
+// 3. Even though both use SPI2_HOST internally, Arduino-ESP32's
+//    SPIClass implementation handles GPIO-matrix pin remapping per
+//    instance, so the LCD's MOSI/SCK are completely separate from LoRa's.
 SPIClass* lcdSPI = NULL;
-static const int spiClk = 10 * 1000 * 1000;  // 10 MHz for reliable signal
+static const int spiClk = 5 * 1000 * 1000;  // 5 MHz - compromise
 _lcd_dev lcddev;
 
 #define delay_ms(x) delay(x)
 u16 POINT_COLOR = 0x0000, BACK_COLOR = 0xFFFF;
 
-// 9-bit SPI via 2-byte transfer (16 clock cycles):
-// Frame:  [cmd, D7, D6, D5, D4, D3, D2, D1, D0]
-// Byte 0: [cmd, D7, D6, D5, D4, D3, D2, D1]
-// Byte 1: [D0,   0,  0,  0,  0,  0,  0,  0 ]
-// CS is toggled manually between transfers to maintain 9-bit alignment.
-u8 SPI_WriteByte(int SPIx, u8 Byte, u8 cmd) {
+// ============================================================
+// 9-bit SPI core
+// ============================================================
+// Frame:  [cmd/data, D7, D6, D5, D4, D3, D2, D1, D0]
+// Sent as two 8-bit SPI bytes (16 SCK edges total):
+// Byte 0: [cmd_bit, D7, D6, D5, D4, D3, D2, D1]  (cmd_bit = 0 for reg, 1 for data)
+// Byte 1: [D0,       0,  0,  0,  0,  0,  0,  0 ]
+//
+// CS must toggle HIGH between frames for ST7789 to recognize frame
+// boundaries. No beginTransaction needed per call - settings are
+// configured once in LCD_GPIOInit.
+void SPI_WriteByte(int SPIx, u8 Byte, u8 cmd) {
     uint8_t txbuf[2];
     txbuf[0] = (uint8_t)((cmd << 7) | ((Byte >> 1) & 0x7F));
     txbuf[1] = (uint8_t)(Byte << 7) & 0xFF;
     lcdSPI->transferBytes(txbuf, NULL, 2);
-    return 0;
 }
 
 void LCD_WR_REG(u8 data) {
-    lcdSPI->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
     digitalWrite(LCD_CS, LOW);
     SPI_WriteByte(SPI1, data, 0);
     digitalWrite(LCD_CS, HIGH);
-    lcdSPI->endTransaction();
+    delayMicroseconds(1);
 }
 
 void LCD_WR_DATA(u8 data) {
-    lcdSPI->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
     digitalWrite(LCD_CS, LOW);
     SPI_WriteByte(SPI1, data, 1);
     digitalWrite(LCD_CS, HIGH);
-    lcdSPI->endTransaction();
+    delayMicroseconds(1);
 }
 
 void LCD_WriteReg(u8 LCD_Reg, u16 LCD_RegValue) {
@@ -54,22 +62,14 @@ void LCD_WriteRAM_Prepare(void) {
     LCD_WR_REG(lcddev.wramcmd);
 }
 
-// Write 16-bit pixel color as two 9-bit frames:
-// Frame 1: 1 + (HI BYTE)
-// Frame 2: 1 + (LO BYTE)
-// CS toggles between the two bytes to maintain 9-bit alignment.
+// Write 16-bit pixel color (RGB565 HI then LO)
 void Lcd_WriteData_16Bit(u16 Data) {
-    u8 hi = (u8)((Data >> 8) & 0xFF);
-    u8 lo = (u8)(Data & 0xFF);
-    lcdSPI->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    // ST7789 expects RGB565 HI-byte first, then LO-byte
     digitalWrite(LCD_CS, LOW);
-    SPI_WriteByte(SPI1, hi, 1);
+    SPI_WriteByte(SPI1, (Data >> 8) & 0xFF, 1);
     digitalWrite(LCD_CS, HIGH);
     digitalWrite(LCD_CS, LOW);
-    SPI_WriteByte(SPI1, lo, 1);
+    SPI_WriteByte(SPI1, Data & 0xFF, 1);
     digitalWrite(LCD_CS, HIGH);
-    lcdSPI->endTransaction();
 }
 
 void LCD_DrawPoint(u16 x, u16 y) {
@@ -77,33 +77,58 @@ void LCD_DrawPoint(u16 x, u16 y) {
     Lcd_WriteData_16Bit(POINT_COLOR);
 }
 
-// LCD_Clear: write solid color to entire screen
+// ============================================================
+// Bulk fill - direct, no beginTransaction spam
+// ============================================================
 void LCD_Clear(u16 Color) {
-    unsigned int i, m;
-    LCD_SetWindows(0, 0, lcddev.width - 1, lcddev.height - 1);
-    // NOTE: LCD_SetWindows already calls LCD_WriteRAM_Prepare() internally
+    u8 hi = (u8)((Color >> 8) & 0xFF);
+    u8 lo = (u8)(Color & 0xFF);
+    uint32_t total = (uint32_t)lcddev.width * lcddev.height;
 
-    for (i = 0; i < lcddev.height; i++) {
-        for (m = 0; m < lcddev.width; m++) {
-            Lcd_WriteData_16Bit(Color);
-        }
+    LCD_SetWindows(0, 0, lcddev.width - 1, lcddev.height - 1);
+
+    uint8_t hih[2], loh[2];
+    hih[0] = (uint8_t)(0x80 | ((hi >> 1) & 0x7F));
+    hih[1] = (uint8_t)(hi << 7) & 0xFF;
+    loh[0] = (uint8_t)(0x80 | ((lo >> 1) & 0x7F));
+    loh[1] = (uint8_t)(lo << 7) & 0xFF;
+
+    for (uint32_t n = 0; n < total; n++) {
+        digitalWrite(LCD_CS, LOW);
+        lcdSPI->transferBytes(hih, NULL, 2);
+        digitalWrite(LCD_CS, HIGH);
+        digitalWrite(LCD_CS, LOW);
+        lcdSPI->transferBytes(loh, NULL, 2);
+        digitalWrite(LCD_CS, HIGH);
+        if ((n & 0x7FF) == 0) yield();
     }
 }
 
+// ============================================================
+// Hardware init
+// ============================================================
 void LCD_GPIOInit(void) {
-    // Create new SPI instance using default constructor.
-    // On ESP32-S3, default SPIClass maps to HSPI (SPI2_HOST). LoRa uses its own
-    // SPIClass instance on the same host but different pins, routed via GPIO Matrix.
     lcdSPI = new SPIClass();
+
     pinMode(LCD_LED, OUTPUT);
     pinMode(LCD_CS, OUTPUT);
     digitalWrite(LCD_CS, HIGH);
 
-    // Initialize SPI controller with custom pins.
-    // SCK=16, MOSI=17, MISO=-1 (unused, LCD is write-only).
-    // SS=-1: SPI peripheral does NOT auto-control CS — we toggle it manually
-    // in LCD_WR_REG/LCD_WR_DATA to maintain 9-bit SPI alignment.
+    // Explicitly configure SCK and MOSI pins as OUTPUT to ensure
+    // GPIO matrix routing is active. (Some framework versions only
+    // route during beginTransaction; setting pinMode here is a belt-
+    // and-suspenders approach to guarantee the pins are driven.)
+    pinMode(VSPI_SCLK, OUTPUT);
+    pinMode(VSPI_MOSI, OUTPUT);
+    digitalWrite(VSPI_SCLK, LOW);
+    digitalWrite(VSPI_MOSI, LOW);
+
     lcdSPI->begin(VSPI_SCLK, VSPI_MISO, VSPI_MOSI, -1);
+
+    // ONE-TIME SPI configuration - settings remain valid until the
+    // end of the program. This is the "original" simple pattern from
+    // the working reference project.
+    lcdSPI->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
 }
 
 void LCD_RESET(void) {
@@ -118,20 +143,18 @@ void LCD_RESET(void) {
 #endif
 }
 
-// Backlight: use LEDC PWM for 5% brightness (very dim)
-// ESP32-S3 LEDC: channel 0, 5 kHz, 8-bit resolution. Duty 13 ≈ 5% of 255.
+// Backlight: LEDC PWM 5% brightness
 void LCD_BacklightInit(void) {
 #if LCD_LED != -1
     const int LEDC_CH = 0;
     const int LEDC_FREQ = 5000;
-    const int LEDC_RES = 8;        // 0–255
-    const int DUTY_5_PCT = 13;     // 5% of 255 ≈ 12.75, rounded to 13
+    const int LEDC_RES = 8;
+    const int DUTY_5_PCT = 13;
 
     ledcSetup(LEDC_CH, LEDC_FREQ, LEDC_RES);
     ledcAttachPin(LCD_LED, LEDC_CH);
     ledcWrite(LEDC_CH, DUTY_5_PCT);
-    Serial.printf("[LCD] Backlight 5%% on GPIO%d (LEDC ch=%d, duty=%d)\n",
-                  LCD_LED, LEDC_CH, DUTY_5_PCT);
+    Serial.printf("[LCD] Backlight 5%% on GPIO%d (LEDC ch=%d)\n", LCD_LED, LEDC_CH);
 #endif
 }
 
@@ -140,13 +163,10 @@ void LCD_Init(void) {
     Serial.printf("[LCD] Pins: CS=%d, RST=%d, LED=%d, SCK=%d, MOSI=%d\n",
                   LCD_CS, LCD_RST, LCD_LED, VSPI_SCLK, VSPI_MOSI);
 
-    // GPIO + SPI init
     LCD_GPIOInit();
-
-    // Hardware reset
     LCD_RESET();
 
-    // ST7789 init sequence (from working reference)
+    // -------- ST7789 init sequence --------
     LCD_WR_REG(0x36);
     LCD_WR_DATA(0x00);
 
@@ -217,22 +237,20 @@ void LCD_Init(void) {
     LCD_WR_DATA(0x20);
     LCD_WR_DATA(0x23);
 
-    LCD_WR_REG(0x21);  // display inversion
+    LCD_WR_REG(0x21);
 
-    LCD_WR_REG(0x11);  // sleep out
+    LCD_WR_REG(0x11);
     delay_ms(120);
 
-    LCD_WR_REG(0x29);  // display on
+    LCD_WR_REG(0x29);
+    // ---------------------------------------
 
-    // Set direction (this writes 0x36 register)
     LCD_set_direction(USE_HORIZONTAL);
-
-    // Enable backlight
     LCD_BacklightInit();
 
-    // Clear screen to verify
-    LCD_Clear(0x0000);
-    Serial.println("[LCD] Init complete");
+    // Fill with WHITE (0xFFFF) - if SPI is working you MUST see light
+    LCD_Clear(0xFFFF);
+    Serial.println("[LCD] Init complete - screen filled WHITE");
 }
 
 void LCD_SetWindows(u16 xStar, u16 yStar, u16 xEnd, u16 yEnd) {
@@ -265,7 +283,6 @@ void LCD_set_direction(u8 lcd_direction) {
     lcddev.setycmd = 0x2B;
     lcddev.wramcmd = 0x2C;
     lcddev.dir = lcd_direction % 4;
-    // No offset: panel driver is calibrated for native 240x285 area.
     const u16 PANEL_OFFSET = 0;
     switch (lcddev.dir) {
         case 0:
@@ -300,25 +317,31 @@ void LCD_set_direction(u8 lcd_direction) {
 }
 
 void LCD_Fill_hv(u16 sx, u16 sy, u16 ex, u16 ey, u16 color) {
-    u16 i, j;
-    u16 width = ex - sx + 1;
-    u16 height = ey - sy + 1;
-    LCD_SetWindows(sx, sy, ex, ey);
-    // NOTE: LCD_SetWindows already calls LCD_WriteRAM_Prepare() internally
+    u8 hi = (u8)((color >> 8) & 0xFF);
+    u8 lo = (u8)(color & 0xFF);
+    uint32_t total = (uint32_t)(ex - sx + 1) * (ey - sy + 1);
 
-    for (i = 0; i < height; i++) {
-        for (j = 0; j < width; j++) {
-            Lcd_WriteData_16Bit(color);
-        }
+    LCD_SetWindows(sx, sy, ex, ey);
+
+    uint8_t hih[2], loh[2];
+    hih[0] = (uint8_t)(0x80 | ((hi >> 1) & 0x7F));
+    hih[1] = (uint8_t)(hi << 7) & 0xFF;
+    loh[0] = (uint8_t)(0x80 | ((lo >> 1) & 0x7F));
+    loh[1] = (uint8_t)(lo << 7) & 0xFF;
+
+    for (uint32_t n = 0; n < total; n++) {
+        digitalWrite(LCD_CS, LOW);
+        lcdSPI->transferBytes(hih, NULL, 2);
+        digitalWrite(LCD_CS, HIGH);
+        digitalWrite(LCD_CS, LOW);
+        lcdSPI->transferBytes(loh, NULL, 2);
+        digitalWrite(LCD_CS, HIGH);
+        if ((n & 0x7FF) == 0) yield();
     }
 }
 
 void LCD_PushImage(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint8_t *data, uint32_t byte_len) {
     LCD_SetWindows(x1, y1, x2, y2);
-
-    LCD_WriteRAM_Prepare();
-
-    // Push raw bytes (assume caller has correct RGB565 HI-LO ordering)
     for (uint32_t i = 0; i < byte_len; i++) {
         LCD_WR_DATA(data[i]);
     }
