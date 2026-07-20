@@ -4,7 +4,7 @@
 
 BoardType board;
 
-static SPIClass spi;
+static SPIClass spi(FSPI);  // LoRa 独占 FSPI (SPI2_HOST)，与 LCD 的 HSPI (SPI3_HOST) 完全独立
 RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, spi, SPISettings());
 
 #if defined(SX126X_RXEN)
@@ -378,7 +378,8 @@ bool radio_init() {
   #endif
 
   // ============================================================
-  // [4] Initialize SPI for LoRa - use HSPI (SPI2) on ESP32-S3
+  // [4] Initialize SPI for LoRa - use FSPI (SPI2_HOST) on ESP32-S3
+  // (LCD uses HSPI (SPI3_HOST) on a separate hardware controller, so no conflict)
   // ============================================================
   spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI, P_LORA_NSS);
   Serial.printf("[LoRa] SPI initialized: SCK=%d, MISO=%d, MOSI=%d, NSS=%d\n",

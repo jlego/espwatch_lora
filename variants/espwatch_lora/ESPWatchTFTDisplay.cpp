@@ -124,47 +124,58 @@ void ESPWatchTFTDisplay::drawPixel(int x, int y, uint16_t color) {
   Lcd_WriteData_16Bit(color);
 }
 
+// 辅助：把一个 16-bit 颜色预编码成 9-bit SPI 的 2 字节格式
+static inline void encode_color_9bit(uint16_t color, uint8_t out[2]) {
+  uint8_t hi = (uint8_t)((color >> 8) & 0xFF);
+  uint8_t lo = (uint8_t)(color & 0xFF);
+  out[0] = (uint8_t)(0x80 | ((hi >> 1) & 0x7F));
+  out[1] = (uint8_t)(hi << 7) & 0xFF;
+  out[2] = (uint8_t)(0x80 | ((lo >> 1) & 0x7F));
+  out[3] = (uint8_t)(lo << 7) & 0xFF;
+}
+
+// 辅助：推一个已预编码的 16-bit 颜色 (4 字节 -> 实际是 2 个 9-bit 帧)
+static inline void push_encoded_pixel(const uint8_t encoded[4]) {
+  digitalWrite(LCD_CS, LOW);
+  lcdSPI->transferBytes((uint8_t*)encoded, NULL, 2);
+  digitalWrite(LCD_CS, HIGH);
+  digitalWrite(LCD_CS, LOW);
+  lcdSPI->transferBytes((uint8_t*)(encoded + 2), NULL, 2);
+  digitalWrite(LCD_CS, HIGH);
+}
+
 void ESPWatchTFTDisplay::drawChar5x7(char c, int x, int y, uint16_t color, uint16_t bkg, int size) {
-  if (c < 32 || c > 126) c = 32;  // replace unknown chars with space
+  if (c < 32 || c > 126) c = 32;
   uint8_t idx = c - 32;
 
-  // Draw the 5 columns * 7 rows character
-  for (int col = 0; col < CHAR_WIDTH; col++) {
-    uint8_t column_bits = font5x7[idx][col];
-    for (int row = 0; row < CHAR_HEIGHT; row++) {
-      bool pixel_on = column_bits & (1 << row);  // bit 0 = top row
-      uint16_t pixel_color = pixel_on ? color : bkg;
-      if (size == 1) {
-        LCD_SetCursor(x + col, y + row);
-        Lcd_WriteData_16Bit(pixel_color);
-      } else {
-        // scale up by drawing size x size pixel blocks
-        for (int sy = 0; sy < size; sy++) {
+  // 预编码前景色
+  uint8_t enc_color[4];
+  encode_color_9bit(color, enc_color);
+
+  uint32_t pixel_count = 0;
+
+  // 透明背景：只写前景色像素，背景像素跳过，让底下已绘制的内容透出来
+  // 这样画在蓝色标题栏上的字就不会有黑色底
+  for (int row = 0; row < CHAR_HEIGHT; row++) {
+    for (int sy = 0; sy < size; sy++) {
+      for (int col = 0; col < CHAR_WIDTH; col++) {
+        bool pixel_on = font5x7[idx][col] & (1 << row);
+        if (pixel_on) {
+          // 这一整块 size×1 行像素都要画前景色
+          LCD_SetWindows(x + col * size, y + row * size + sy,
+                         x + col * size + size - 1, y + row * size + sy);
           for (int sx = 0; sx < size; sx++) {
-            LCD_SetCursor(x + col * size + sx, y + row * size + sy);
-            Lcd_WriteData_16Bit(pixel_color);
+            push_encoded_pixel(enc_color);
+            pixel_count++;
+            if ((pixel_count & 0x3F) == 0) yield();
           }
         }
+        // pixel_off: 不写，保持底下原有颜色（透明背景）
       }
     }
   }
-
-  // Right edge spacing column (background color)
-  if (size == 1) {
-    for (int row = 0; row < CHAR_HEIGHT; row++) {
-      LCD_SetCursor(x + CHAR_WIDTH, y + row);
-      Lcd_WriteData_16Bit(bkg);
-    }
-  } else {
-    for (int sy = 0; sy < size; sy++) {
-      for (int row = 0; row < CHAR_HEIGHT; row++) {
-        for (int sx = 0; sx < size; sx++) {
-          LCD_SetCursor(x + CHAR_WIDTH * size + sx, y + row * size + sy);
-          Lcd_WriteData_16Bit(bkg);
-        }
-      }
-    }
-  }
+  // 右侧间距列也透明：跳过不写
+  (void)bkg;
 }
 
 // Draw test pattern - 4 colored corner squares to verify pixel drawing works
@@ -237,7 +248,108 @@ void ESPWatchTFTDisplay::clear() {
   LCD_Clear(_bkg);
 }
 
+void ESPWatchTFTDisplay::_reinitSpi() {
+  // LCD 用 HSPI (SPI3_HOST)，LoRa 用 FSPI (SPI2_HOST)，完全独立。
+  // 但 LoRa 射频操作可能通过 GPIO 串扰让 ST7789 进入不可恢复的异常状态。
+  // 仅靠 LCD_Wakeup 不够——需要发送软件复位 SWRESET，然后完整重配关键寄存器。
+  Serial.println("[DISP]   SWRESET + reinit ST7789...");
+
+  // 1. 软件复位
+  LCD_WR_REG(0x01);  // SWRESET
+  delay(150);      // ST7789 手册要求复位后等待 120ms+
+
+  // 2. 退出睡眠（SWRESET 后芯片自动进入睡眠）
+  LCD_WR_REG(0x11);  // SLPOUT
+  delay(120);
+
+  // 3. 关键寄存器（与 LCD_Init 一致）
+  LCD_WR_REG(0x36);  // MADCTL
+  LCD_WR_DATA(0x00);
+
+  LCD_WR_REG(0x3A);  // COLMOD: 16-bit RGB565
+  LCD_WR_DATA(0x05);
+
+  LCD_WR_REG(0xB2);  // PORCTRL
+  LCD_WR_DATA(0x0C);
+  LCD_WR_DATA(0x0C);
+  LCD_WR_DATA(0x00);
+  LCD_WR_DATA(0x33);
+  LCD_WR_DATA(0x33);
+
+  LCD_WR_REG(0xB7);  // GCTRL
+  LCD_WR_DATA(0x35);
+
+  LCD_WR_REG(0xBB);  // VCOMS
+  LCD_WR_DATA(0x17);
+
+  LCD_WR_REG(0xC0);  // LCMCTRL
+  LCD_WR_DATA(0x2C);
+
+  LCD_WR_REG(0xC2);  // VDVVRHEN
+  LCD_WR_DATA(0x01);
+
+  LCD_WR_REG(0xC3);  // VRHS
+  LCD_WR_DATA(0x12);
+
+  LCD_WR_REG(0xC4);  // VDVS
+  LCD_WR_DATA(0x20);
+
+  LCD_WR_REG(0xC6);  // FRCTRL2
+  LCD_WR_DATA(0x0F);
+
+  LCD_WR_REG(0xD0);  // PWCTRL1
+  LCD_WR_DATA(0xA4);
+  LCD_WR_DATA(0xA1);
+
+  // Gamma 正极性
+  LCD_WR_REG(0xE0);
+  LCD_WR_DATA(0xD0);
+  LCD_WR_DATA(0x04);
+  LCD_WR_DATA(0x0D);
+  LCD_WR_DATA(0x11);
+  LCD_WR_DATA(0x13);
+  LCD_WR_DATA(0x2B);
+  LCD_WR_DATA(0x3F);
+  LCD_WR_DATA(0x54);
+  LCD_WR_DATA(0x4C);
+  LCD_WR_DATA(0x18);
+  LCD_WR_DATA(0x0D);
+  LCD_WR_DATA(0x0B);
+  LCD_WR_DATA(0x1F);
+  LCD_WR_DATA(0x23);
+
+  // Gamma 负极性
+  LCD_WR_REG(0xE1);
+  LCD_WR_DATA(0xD0);
+  LCD_WR_DATA(0x04);
+  LCD_WR_DATA(0x0C);
+  LCD_WR_DATA(0x11);
+  LCD_WR_DATA(0x13);
+  LCD_WR_DATA(0x2C);
+  LCD_WR_DATA(0x3F);
+  LCD_WR_DATA(0x44);
+  LCD_WR_DATA(0x51);
+  LCD_WR_DATA(0x2F);
+  LCD_WR_DATA(0x1F);
+  LCD_WR_DATA(0x1F);
+  LCD_WR_DATA(0x20);
+  LCD_WR_DATA(0x23);
+
+  LCD_WR_REG(0x21);  // INVON
+
+  LCD_WR_REG(0x29);  // DISPON
+
+  LCD_set_direction(USE_HORIZONTAL);
+
+  Serial.println("[DISP]   ST7789 SWRESET + reinit complete");
+}
+
 void ESPWatchTFTDisplay::startFrame(Color bkg) {
+  if (!_isOn) {
+    Serial.println("[DISP] startFrame: display not on, calling begin()");
+    begin();
+  }
+
   switch (bkg) {
     case DisplayDriver::DARK :
       _bkg = 0x0000;
@@ -265,9 +377,16 @@ void ESPWatchTFTDisplay::startFrame(Color bkg) {
       break;
   }
   _color = (_bkg == 0x0000) ? 0xFFFF : 0x0000;
+
+  Serial.printf("[DISP] startFrame: _isOn=%d, _bkg=0x%04X, _color=0x%04X\n", _isOn, _bkg, _color);
+
+  _reinitSpi();
+
   LCD_Clear(_bkg);
+
   _cursor_x = 0;
   _cursor_y = 0;
+  Serial.println("[DISP]   clear done");
 }
 
 void ESPWatchTFTDisplay::setTextSize(int sz) {
@@ -311,8 +430,10 @@ void ESPWatchTFTDisplay::setCursor(int x, int y) {
 void ESPWatchTFTDisplay::print(const char* str) {
   if (!str || !_isOn) return;
 
+  unsigned long t0 = millis();
   int cx = _cursor_x;
   int cy = _cursor_y;
+  int char_count = 0;
 
   for (int i = 0; str[i] != 0; i++) {
     if (str[i] == '\n') {
@@ -322,54 +443,50 @@ void ESPWatchTFTDisplay::print(const char* str) {
     }
     if (str[i] == '\r') continue;
 
-    // Check screen bounds - wrap to next line
     if (cx + charWidthPx() > 240) {
       cx = 0;
       cy += charHeightPx();
     }
-    if (cy + charHeightPx() > 285) break;  // off screen
+    if (cy + charHeightPx() > 285) break;
 
     drawChar5x7(str[i], cx, cy, _color, _bkg, _text_size);
     cx += charWidthPx();
+    char_count++;
   }
 
   _cursor_x = cx;
   _cursor_y = cy;
+
+  if (char_count > 0) {
+    Serial.printf("[DISP]   print '%s' (%d chars) done in %lums\n", str, char_count, millis() - t0);
+  }
 }
 
 void ESPWatchTFTDisplay::fillRect(int x, int y, int w, int h) {
-  if (!_isOn) return;
+  if (!_isOn || w <= 0 || h <= 0) return;
+  unsigned long t0 = millis();
+  // LCD_Fill_hv 已经是 WDT 安全的（每 64 像素 yield 一次）
   LCD_Fill_hv(x, y, x + w - 1, y + h - 1, _color);
+  Serial.printf("[DISP]   fillRect(%d,%d,%d,%d) color=0x%04X done in %lums\n", x, y, w, h, _color, millis() - t0);
 }
 
 void ESPWatchTFTDisplay::drawRect(int x, int y, int w, int h) {
-  if (!_isOn) return;
-  // Draw 4 edges as 1-pixel wide lines
-  // Top edge
-  for (int px = x; px < x + w; px++) {
-    LCD_SetCursor(px, y);
-    Lcd_WriteData_16Bit(_color);
-  }
-  // Bottom edge
-  for (int px = x; px < x + w; px++) {
-    LCD_SetCursor(px, y + h - 1);
-    Lcd_WriteData_16Bit(_color);
-  }
-  // Left edge
-  for (int py = y; py < y + h; py++) {
-    LCD_SetCursor(x, py);
-    Lcd_WriteData_16Bit(_color);
-  }
-  // Right edge
-  for (int py = y; py < y + h; py++) {
-    LCD_SetCursor(x + w - 1, py);
-    Lcd_WriteData_16Bit(_color);
-  }
+  if (!_isOn || w <= 0 || h <= 0) return;
+  // 用 4 个 1 像素宽的 fillRect 画边，避免逐像素的 LCD_SetCursor 开销
+  fillRect(x, y, w, 1);           // 顶
+  fillRect(x, y + h - 1, w, 1);   // 底
+  fillRect(x, y, 1, h);           // 左
+  fillRect(x + w - 1, y, 1, h);   // 右
 }
 
 void ESPWatchTFTDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
   if (!_isOn) return;
   int width_in_bytes = (w + 7) / 8;
+
+  uint8_t enc_color[4];
+  encode_color_9bit(_color, enc_color);
+
+  uint32_t pixel_count = 0;
 
   for (int row = 0; row < h; row++) {
     for (int col = 0; col < w; col++) {
@@ -378,7 +495,9 @@ void ESPWatchTFTDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h
       bool pixel_on = bits[byte_idx] & (1 << bit_idx);
       if (pixel_on) {
         LCD_SetCursor(x + col, y + row);
-        Lcd_WriteData_16Bit(_color);
+        push_encoded_pixel(enc_color);
+        pixel_count++;
+        if ((pixel_count & 0x3F) == 0) yield();
       }
     }
   }

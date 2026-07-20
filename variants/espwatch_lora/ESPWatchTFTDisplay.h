@@ -18,6 +18,7 @@ class ESPWatchTFTDisplay : public DisplayDriver {
   static const int CHAR_SPACING = 1;  // 1 pixel between characters
   static const int LINE_SPACING = 1;  // 1 pixel between lines
 
+  void _reinitSpi();
   void drawPixel(int x, int y, uint16_t color);
   void drawChar5x7(char c, int x, int y, uint16_t color, uint16_t bkg, int size);
   int charWidthPx() const { return (CHAR_WIDTH + CHAR_SPACING) * _text_size; }

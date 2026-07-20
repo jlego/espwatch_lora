@@ -152,6 +152,7 @@ extern u16  BACK_COLOR;
 #define LGRAYBLUE      	0XA651
 #define LBBLUE          0X2B12
 	    															  
+void LCD_Reinit(void);
 void LCD_Init(void);
 void LCD_DisplayOn(void);
 void LCD_DisplayOff(void);
@@ -164,6 +165,7 @@ void LCD_DrawRectangle(u16 x1, u16 y1, u16 x2, u16 y2);
 void LCD_SetWindows(u16 xStar, u16 yStar,u16 xEnd,u16 yEnd);
 
 u16 LCD_RD_DATA(void);							    
+void LCD_WR_REG(u8 data);
 void LCD_WriteReg(u8 LCD_Reg, u16 LCD_RegValue);
 void LCD_WR_DATA(u8 data);
 u16 LCD_ReadReg(u8 LCD_Reg);
