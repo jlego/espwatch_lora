@@ -133,8 +133,6 @@ void draw_header(const char* title) {
     display.fillRect(0, 0, 240, 28);
     display.setColor(DisplayDriver::LIGHT);
     display.setTextSize(2);
-    display.setCursor(14, 7);
-    display.print("<");
 
     // 标题居中
     int title_len = strlen(title);
@@ -147,13 +145,13 @@ void draw_header(const char* title) {
 void draw_tab_bar() {
     // Chat 页：不显示 tab bar，显示返回提示
     if (_menu_state == MenuScreen::CHAT) {
-        int bar_y = 258;
-        display.setColor(DisplayDriver::LIGHT);
-        display.drawRect(0, bar_y, 240, 27);
-        display.setTextSize(2);
-        display.setColor(DisplayDriver::YELLOW);
-        display.setCursor(40, bar_y + 7);
-        display.print("G0:Back  G45:Scroll");
+        // int bar_y = 258;
+        // display.setColor(DisplayDriver::LIGHT);
+        // display.drawRect(0, bar_y, 240, 27);
+        // display.setTextSize(2);
+        // display.setColor(DisplayDriver::YELLOW);
+        // display.setCursor(40, bar_y + 7);
+        // display.print("G0:Back  G45:Scroll");
         return;
     }
 
@@ -497,9 +495,9 @@ void render_settings_main_menu() {
 
         // 选中框（当前选中的高亮）
         if (i == _settings_menu_idx) {
-            display.setColor(DisplayDriver::BLUE);
-            display.fillRect(4, y, 232, ITEM_H - 2);
             display.setColor(DisplayDriver::LIGHT);
+            display.fillRect(4, y, 232, ITEM_H - 2);
+            display.setColor(DisplayDriver::DARK);
         }
 
         display.setTextSize(2);
@@ -533,12 +531,8 @@ void render_settings_public_info() {
     display.print("BLE PIN");
     display.setTextSize(2);
     display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%d", (int)BLE_PIN_CODE);
+    snprintf(buf, sizeof(buf), "%06lu", (unsigned long)the_mesh.getBLEPin());
     display.print(buf);
-
-    // 白色下边线
-    display.setColor(DisplayDriver::LIGHT);
-    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_radio_setup() {
@@ -616,10 +610,6 @@ void render_settings_theme() {
     display.setColor(DisplayDriver::LIGHT);
     display.setCursor(10, y + 18);
     display.print("Never");
-
-    // 白色下边线
-    display.setColor(DisplayDriver::LIGHT);
-    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_other() {
@@ -650,10 +640,6 @@ void render_settings_other() {
     display.setColor(DisplayDriver::RED);
     display.setCursor(10, y + 18);
     display.print("Hold to reset");
-
-    // 白色下边线
-    display.setColor(DisplayDriver::LIGHT);
-    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings_device_info() {
@@ -695,10 +681,6 @@ void render_settings_device_info() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%ldmin", rtc_clock.getCurrentTime() / 60);
     display.print(buf);
-
-    // 白色下边线
-    display.setColor(DisplayDriver::LIGHT);
-    display.fillRect(4, y + 28, 232, 1);
 }
 
 void render_settings() {
@@ -839,6 +821,7 @@ void loop() {
     } else if (_menu_state == MenuScreen::SETTINGS) {
         // Settings：返回 Channels
         _menu_state = MenuScreen::CHANNELS;
+        _channels_selected = 0;
         Serial.println("[UI] G0 long: Settings -> Channels");
     } else if (_menu_state == MenuScreen::CHANNELS) {
         // Channels：返回 Contacts
