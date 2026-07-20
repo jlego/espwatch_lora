@@ -8,6 +8,13 @@ SimpleMeshTables tables;
 
 static unsigned long next_refresh = 0;
 
+// 屏幕休眠状态（CUSTOM_BOARD）
+static unsigned long _last_activity = 0;
+static bool _screen_off = false;
+static bool _just_woken = false;
+static volatile bool _g0_pressed = false;  // GPIO0 中断标志
+#define SCREEN_TIMEOUT_MS  10000
+
 #if defined(ESP32)
   #include <SPIFFS.h>
   DataStore store(SPIFFS, rtc_clock);
@@ -60,6 +67,23 @@ void setup() {
   draw_startup_screen();
   user_btn.begin();
   user_btn2.begin();
+  _last_activity = millis();  // 初始化屏幕休眠计时器
+
+  // 配置 GPIO0：中断 + light sleep 唤醒源
+  pinMode(0, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(0), []() {
+    _g0_pressed = true;
+  }, FALLING);
+  gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  Serial.println("[SETUP] GPIO0: interrupt + light-sleep wake source OK");
+
+  // 打印 CW2015 电池信息
+  uint16_t batt_mv = board.getBattMilliVolts();
+  uint8_t batt_pct = board.getBattPercent();
+  uint8_t cw2015_soc = board.getCW2015SoC();
+  Serial.printf("[BATT] CW2015: Voltage=%dmV, Estimated=%d%%, CW2015_SoC=%d%%\n",
+                batt_mv, batt_pct, cw2015_soc);
 #endif
 
   if (!radio_init()) {
@@ -128,18 +152,68 @@ static bool _settings_selected = false;   // 设置中：是否在子分类里
 
 // ========= 通用 UI 组件 =========
 void draw_header(const char* title) {
+    char buf[16];
+
     // 顶部标题栏 (0, 0, 240, 28)
     display.setColor(DisplayDriver::BLUE);
     display.fillRect(0, 0, 240, 28);
     display.setColor(DisplayDriver::LIGHT);
     display.setTextSize(2);
 
+    // 左上角：当前时分
+    uint32_t now_sec = rtc_clock.getCurrentTime();
+    int hours = (now_sec / 3600) % 24;
+    int mins = (now_sec % 3600) / 60;
+    snprintf(buf, sizeof(buf), "%02d:%02d", hours, mins);
+    display.setTextSize(1);
+    display.setCursor(15, 11);
+    display.print(buf);
+
     // 标题居中
+    display.setTextSize(2);
     int title_len = strlen(title);
     int title_x = 120 - (title_len * 6);
     if (title_x < 25) title_x = 25;
     display.setCursor(title_x, 7);
     display.print(title);
+
+    // 右上角：电量数值 + 电池图标
+    uint8_t batt = board.getBattPercent();
+
+    // 电量数值（图标左边）
+    snprintf(buf, sizeof(buf), "%d", batt);
+    display.setTextSize(1);
+    int text_w = strlen(buf) * 6;
+    display.setCursor(198 - text_w, 11);
+    display.print(buf);
+
+    // 电池图标
+    int bat_x = 200;
+    int bat_y = 9;
+    int bat_w = 22;
+    int bat_h = 10;
+
+    // 电池外框
+    display.setColor(DisplayDriver::GREEN);
+    display.drawRect(bat_x, bat_y, bat_w, bat_h);
+    // 电池正极（右侧小凸起）
+    display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
+
+    // 电池内部填充（根据电量）
+    int fill_w = (bat_w - 2) * batt / 100;
+    if (fill_w > 0) {
+        display.fillRect(bat_x + 1, bat_y + 1, fill_w, bat_h - 2);
+    }
+
+    // 低电量警告（红色）
+    if (batt <= 20) {
+        display.setColor(DisplayDriver::RED);
+        display.drawRect(bat_x, bat_y, bat_w, bat_h);
+        display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
+    }
+
+    // 恢复默认颜色，避免影响后续渲染
+    display.setColor(DisplayDriver::LIGHT);
 }
 
 void draw_tab_bar() {
@@ -745,14 +819,59 @@ void draw_status_screen() {
 // ===================== LOOP =====================
 
 void loop() {
+
+#ifdef CUSTOM_BOARD
+  // 屏幕休眠：G0 中断唤醒 + light sleep
+  if (_screen_off) {
+    the_mesh.loop();  // 保持 LoRa/BLE 运行
+
+    // 进入 100ms light sleep，GPIO0 低电平或定时器到期唤醒
+    esp_sleep_enable_timer_wakeup(100000ULL);
+    esp_light_sleep_start();
+
+    // light sleep 醒来后再检查一次中断标志
+    if (_g0_pressed) {
+      _g0_pressed = false;
+      _screen_off = false;
+      _just_woken = true;
+      _last_activity = millis();
+      Serial.println("[UI] Screen wake by G0 (after light sleep)");
+      display.turnOn();
+      draw_status_screen();
+      next_refresh = millis() + 60000;
+      return;
+    }
+
+    return;  // 继续休眠循环
+  }
+#endif
+
   the_mesh.loop();
 
 #ifdef CUSTOM_BOARD
   unsigned long now = millis();
 
+  // 正常操作时清除中断标志
+  _g0_pressed = false;
+
+  if (now - _last_activity >= SCREEN_TIMEOUT_MS && !_screen_off) {
+    display.turnOff();
+    _screen_off = true;
+    Serial.println("[UI] Screen timeout -> off");
+  }
+
   // 按钮输入（与 cardputer 的键盘处理类似，但简化为 2 个按钮）
   int btn_g0 = user_btn.check();    // GPIO0: 动作键（Enter/Advert/Scroll）
   int btn_g45 = user_btn2.check();  // GPIO45: 切页键（Next）——注意长按交给硬件关机
+
+  // 有按键交互时重置休眠计时器
+  if (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE) {
+    _last_activity = now;
+    if (_just_woken) {
+      _just_woken = false;
+      return;  // 唤醒后的首次按键，不触发菜单操作
+    }
+  }
 
   // --- G45 (Next / Scroll down) ---
   if (btn_g45 == BUTTON_EVENT_CLICK) {

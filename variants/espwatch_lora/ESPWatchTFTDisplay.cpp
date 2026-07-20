@@ -235,8 +235,12 @@ bool ESPWatchTFTDisplay::begin() {
 }
 
 void ESPWatchTFTDisplay::turnOn() {
-  begin();
-  _needsReinit = true;  // After waking from sleep, need to reinit
+  // 先尝试快速唤醒：SLPOUT + DISPON + 背光
+  // 如果 SPI 在 light sleep 后丢失，LCD_Wakeup 会失败，再 fallback 到完整 LCD_Init
+  LCD_Wakeup();
+  _isOn = true;
+  _needsReinit = false;
+  Serial.println("[LCD] turnOn() - LCD_Wakeup (SLPOUT+DISPON+backlight)");
 }
 
 void ESPWatchTFTDisplay::turnOff() {

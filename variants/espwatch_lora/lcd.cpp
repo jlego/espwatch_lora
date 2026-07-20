@@ -355,12 +355,28 @@ void LCD_PushImage(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint8_t *
 }
 
 void LCD_Sleep(void) {
-    LCD_WR_REG(0x10);
+    // 关闭背光
+#if LCD_LED != -1
+    const int LEDC_CH = 7;
+    ledcWrite(LEDC_CH, 0);
+#endif
+    LCD_WR_REG(0x10);  // SLPIN
     delay_ms(120);
 }
 
 void LCD_Wakeup(void) {
-    LCD_WR_REG(0x11);
+    LCD_WR_REG(0x11);  // SLPOUT
     delay_ms(120);
-    LCD_WR_REG(0x29);
+    LCD_WR_REG(0x29);  // DISPON
+    delay_ms(120);
+    // 重新开启背光
+#if LCD_LED != -1
+    const int LEDC_CH = 7;
+    const int LEDC_FREQ = 5000;
+    const int LEDC_RES = 8;
+    const int DUTY_5_PCT = 13;
+    ledcSetup(LEDC_CH, LEDC_FREQ, LEDC_RES);
+    ledcAttachPin(LCD_LED, LEDC_CH);
+    ledcWrite(LEDC_CH, DUTY_5_PCT);
+#endif
 }
