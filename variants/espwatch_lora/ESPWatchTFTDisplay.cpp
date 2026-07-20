@@ -228,6 +228,7 @@ bool ESPWatchTFTDisplay::begin() {
     drawTestPattern();
 
     _isOn = true;
+    _needsReinit = false;  // LCD_Init already did full initialization
     Serial.println("ESPWatch TFT 240x285 display initialized");
   }
   return true;
@@ -235,6 +236,7 @@ bool ESPWatchTFTDisplay::begin() {
 
 void ESPWatchTFTDisplay::turnOn() {
   begin();
+  _needsReinit = true;  // After waking from sleep, need to reinit
 }
 
 void ESPWatchTFTDisplay::turnOff() {
@@ -380,7 +382,11 @@ void ESPWatchTFTDisplay::startFrame(Color bkg) {
 
   Serial.printf("[DISP] startFrame: _isOn=%d, _bkg=0x%04X, _color=0x%04X\n", _isOn, _bkg, _color);
 
-  _reinitSpi();
+  // 只在首次初始化或需要重新初始化时才调用 _reinitSpi()
+  if (_needsReinit) {
+    _reinitSpi();
+    _needsReinit = false;
+  }
 
   LCD_Clear(_bkg);
 

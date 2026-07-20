@@ -128,7 +128,7 @@ void draw_header(const char* title) {
     display.fillRect(0, 0, 240, 28);
     display.setColor(DisplayDriver::LIGHT);
     display.setTextSize(2);
-    display.setCursor(4, 7);
+    display.setCursor(14, 7);
     display.print("<");
 
     // 标题居中
@@ -175,11 +175,7 @@ void draw_tab_bar() {
 }
 
 void draw_chat_back_hint() {
-    int bar_y = 258;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, bar_y + 4);
-    display.print("G45: Next  G0: Advert");
+    // (help hint removed)
 }
 
 void draw_settings_bottom_menu(bool in_sub) {
@@ -309,16 +305,10 @@ void render_channels() {
         display.fillRect(220, y + 11, 6, 6);
     }
 
-    // 说明
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, 15);
-    display.print("Click G0 to advertise");
-
     // 频道说明
     display.setColor(DisplayDriver::LIGHT);
     display.setTextSize(1);
-    display.setCursor(4, y_start + 8 * ITEM_H);
+    display.setCursor(4, y_start + 7 * ITEM_H);
     snprintf(buf, sizeof(buf), "Channel count: %d", num_channels);
     display.print(buf);
 }
@@ -363,8 +353,6 @@ void render_chat() {
         display.setCursor(14, y + 6);
         snprintf(buf, sizeof(buf), "Network: %d peers online", num_contacts);
         display.print(buf);
-        display.setCursor(14, y + 18);
-        display.print("G0: Send advert  G45: Next");
     } else {
         y += BUBBLE_H + 3;
         display.setColor(DisplayDriver::YELLOW);
@@ -372,8 +360,6 @@ void render_chat() {
         display.setColor(DisplayDriver::DARK);
         display.setCursor(14, y + 6);
         display.print("No contacts yet");
-        display.setCursor(14, y + 18);
-        display.print("Press G0 to broadcast advert");
     }
 
     // 气泡 3：运行时间
@@ -449,12 +435,6 @@ void render_settings_main_menu() {
         display.setCursor(10, y + 7);
         display.print(categories[idx]);
     }
-
-    // 底部提示栏
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, 15);
-    display.print("G0: Enter  G45: Next");
 }
 
 void render_settings_public_info() {
@@ -484,13 +464,6 @@ void render_settings_public_info() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%d", (int)BLE_PIN_CODE);
     display.print(buf);
-
-    // 说明
-    y += 40;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, y);
-    display.print("G0: Back  G45: Next page");
 }
 
 void render_settings_radio_setup() {
@@ -545,13 +518,6 @@ void render_settings_radio_setup() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%d dBm", LORA_TX_POWER);
     display.print(buf);
-
-    // 底部提示
-    y += 40;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, y);
-    display.print("G0: Back  G45: Next page");
 }
 
 void render_settings_theme() {
@@ -589,12 +555,6 @@ void render_settings_theme() {
     display.setColor(DisplayDriver::LIGHT);
     display.setCursor(10, y + 18);
     display.print("Never");
-
-    y += 40;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, y);
-    display.print("G0: Back  G45: Next page");
 }
 
 void render_settings_other() {
@@ -631,12 +591,6 @@ void render_settings_other() {
     display.setColor(DisplayDriver::RED);
     display.setCursor(10, y + 18);
     display.print("Hold to reset");
-
-    y += 40;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, y);
-    display.print("G0: Back  G45: Next page");
 }
 
 void render_settings_device_info() {
@@ -686,12 +640,6 @@ void render_settings_device_info() {
     display.setCursor(10, y + 18);
     snprintf(buf, sizeof(buf), "%ldmin", rtc_clock.getCurrentTime() / 60);
     display.print(buf);
-
-    y += 40;
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    display.setCursor(4, y);
-    display.print("G0: Back  G45: Next page");
 }
 
 void render_settings() {
@@ -747,10 +695,6 @@ void draw_status_screen() {
     // 底部栏
     if (_menu_state == MenuScreen::CONTACTS || _menu_state == MenuScreen::CHANNELS) {
         draw_tab_bar();
-    } else if (_menu_state == MenuScreen::CHAT) {
-        draw_chat_back_hint();
-    } else {
-        draw_settings_bottom_menu(_settings_selected);
     }
 
     display.endFrame();

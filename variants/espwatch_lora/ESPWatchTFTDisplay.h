@@ -6,6 +6,7 @@
 
 class ESPWatchTFTDisplay : public DisplayDriver {
   bool _isOn;
+  bool _needsReinit;
   uint16_t _color;
   uint16_t _bkg;
   int _cursor_x, _cursor_y;
@@ -27,7 +28,7 @@ class ESPWatchTFTDisplay : public DisplayDriver {
   void drawTestPattern();
 
 public:
-  ESPWatchTFTDisplay() : DisplayDriver(240, 285), _isOn(false), _color(0xFFFF), _bkg(0x0000), _cursor_x(0), _cursor_y(0), _text_size(1) {}
+  ESPWatchTFTDisplay() : DisplayDriver(240, 285), _isOn(false), _needsReinit(false), _color(0xFFFF), _bkg(0x0000), _cursor_x(0), _cursor_y(0), _text_size(1) {}
   bool begin();
 
   bool isOn() override { return _isOn; }
