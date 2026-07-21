@@ -69,15 +69,6 @@ void setup() {
   user_btn2.begin();
   _last_activity = millis();  // 初始化屏幕休眠计时器
 
-  // 配置 GPIO0：中断 + light sleep 唤醒源
-  pinMode(0, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(0), []() {
-    _g0_pressed = true;
-  }, FALLING);
-  gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
-  esp_sleep_enable_gpio_wakeup();
-  Serial.println("[SETUP] GPIO0: interrupt + light-sleep wake source OK");
-
   // 打印 CW2015 电池信息
   uint16_t batt_mv = board.getBattMilliVolts();
   uint8_t batt_pct = board.getBattPercent();
@@ -821,28 +812,25 @@ void draw_status_screen() {
 void loop() {
 
 #ifdef CUSTOM_BOARD
-  // 屏幕休眠：G0 中断唤醒 + light sleep
   if (_screen_off) {
-    the_mesh.loop();  // 保持 LoRa/BLE 运行
+    the_mesh.loop();  // ← 保持 LoRa/BLE
 
-    // 进入 100ms light sleep，GPIO0 低电平或定时器到期唤醒
+    pinMode(0, INPUT_PULLUP);
+    gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(100000ULL);
-    esp_light_sleep_start();
-
-    // light sleep 醒来后再检查一次中断标志
-    if (_g0_pressed) {
-      _g0_pressed = false;
+    esp_light_sleep_start(); // ← 避免唤醒后立即进入下一次休眠循环
+    // 醒来后检测 G0
+    if (digitalRead(0) == LOW) {
       _screen_off = false;
       _just_woken = true;
-      _last_activity = millis();
-      Serial.println("[UI] Screen wake by G0 (after light sleep)");
+      _last_activity = millis();  // ← 重置休眠计时器
+      Serial.println("[UI] Screen wake by G0");
       display.turnOn();
-      draw_status_screen();
-      next_refresh = millis() + 60000;
-      return;
+    //   draw_status_screen();
+    //   next_refresh = millis() + 60000;  // ← 设置下次刷新时间
     }
-
-    return;  // 继续休眠循环
+    return;  // ← 继续休眠循环
   }
 #endif
 
@@ -851,13 +839,11 @@ void loop() {
 #ifdef CUSTOM_BOARD
   unsigned long now = millis();
 
-  // 正常操作时清除中断标志
-  _g0_pressed = false;
-
   if (now - _last_activity >= SCREEN_TIMEOUT_MS && !_screen_off) {
     display.turnOff();
     _screen_off = true;
     Serial.println("[UI] Screen timeout -> off");
+    return;
   }
 
   // 按钮输入（与 cardputer 的键盘处理类似，但简化为 2 个按钮）
@@ -867,9 +853,10 @@ void loop() {
   // 有按键交互时重置休眠计时器
   if (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE) {
     _last_activity = now;
-    if (_just_woken) {
+    if(_just_woken) {
       _just_woken = false;
-      return;  // 唤醒后的首次按键，不触发菜单操作
+      Serial.println("[UI] Just woken up, ignoring first button press");
+    //   return;  // 忽略唤醒后的第一次按键，避免误操作
     }
   }
 
