@@ -363,16 +363,16 @@ bool radio_init() {
                 busy_after == HIGH ? "HIGH" : "LOW");
 
   // ============================================================
-  // [3] RF switch pins
+  // [3] RF switch pins - will be configured in std_init()
   // ============================================================
   #if defined(SX126X_RXEN) && defined(SX126X_TXEN)
-    Serial.println("[LoRa] Configuring external RF switch");
+    Serial.println("[LoRa] External RF switch will be configured in std_init()");
+    Serial.printf("[LoRa] RF switch pins: RXEN=%d, TXEN=%d\n", RXEN_PIN, TXEN_PIN);
+    // Initialize pins to known state
     pinMode(RXEN_PIN, OUTPUT);
     pinMode(TXEN_PIN, OUTPUT);
     digitalWrite(RXEN_PIN, LOW);
     digitalWrite(TXEN_PIN, LOW);
-    radio.setRfSwitchPins(RXEN_PIN, TXEN_PIN);
-    Serial.printf("[LoRa] RF switch pins: RXEN=%d, TXEN=%d\n", RXEN_PIN, TXEN_PIN);
   #else
     Serial.println("[LoRa] Using DIO2 for RF switch");
   #endif
@@ -447,21 +447,22 @@ bool radio_init() {
   Serial.println("[LoRa] Calling radio.std_init(SX1268)...");
 #endif
 
-  int16_t rc = radio.std_init(&spi);
-  Serial.printf("[LoRa] std_init() returned: %d\n", rc);
+  bool rc = radio.std_init(&spi);
+  Serial.printf("[LoRa] std_init() returned: %s\n", rc ? "true" : "false");
 
-  bool init_result = (rc == 0);  // 0 = RadioLib ERR_NONE
-  if (init_result) {
+  if (rc) {
 #ifdef SX1262_RADIO
     Serial.println("[LoRa] SX1262 initialized successfully");
 #elif defined(SX1268_RADIO)
     Serial.println("[LoRa] SX1268 initialized successfully");
 #endif
+    // E22-400MM22S uses external RF switch and PA, skip setPaConfig
+    // Only configure setPaConfig for modules with internal PA
+#if !defined(SX126X_RXEN) && !defined(SX126X_TXEN)
     Serial.println("[LoRa] Configuring PA");
 #ifdef SX1262_RADIO
     int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
 #elif defined(SX1268_RADIO)
-    // SX1268: deviceSel MUST be 0x00 (not 0x01). 0x01 is for SX1262 only.
     int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
 #endif
     if (pa_result == 0) {
@@ -469,6 +470,9 @@ bool radio_init() {
     } else {
       Serial.printf("[LoRa] PA config failed: %d (non-fatal, continuing)\n", pa_result);
     }
+#else
+    Serial.println("[LoRa] Using external RF switch/PA - skipping setPaConfig");
+#endif
   } else {
 #ifdef SX1262_RADIO
     Serial.println("[LoRa] ERROR: SX1262 initialization failed!");
@@ -479,7 +483,7 @@ bool radio_init() {
                   digitalRead(P_LORA_BUSY) == HIGH ? "HIGH" : "LOW");
   }
 
-  return init_result;
+  return rc;
 }
 
 uint32_t radio_get_rng_seed() {

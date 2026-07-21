@@ -17,9 +17,17 @@ class CustomSX1268 : public SX1268 {
     {
   #ifdef SX126X_DIO3_TCXO_VOLTAGE
       float tcxo = SX126X_DIO3_TCXO_VOLTAGE;
+      Serial.printf("[LoRa] TCXO voltage from config: %.1fV\n", tcxo);
   #else
-      float tcxo = 1.6f;
+      float tcxo = 0.0f;  // Default to no TCXO (most modules don't have it)
+      Serial.println("[LoRa] No TCXO config, using 0.0V");
   #endif
+
+  // E22-400MM22S has no TCXO - force 0.0V if TCXO voltage is set but chip doesn't have one
+  // This is a workaround for modules that don't use TCXO
+  if (tcxo > 0.0f) {
+    Serial.println("[LoRa] WARNING: TCXO voltage > 0 but module may not have TCXO");
+  }
 
   #ifdef LORA_CR
       uint8_t cr = LORA_CR;
@@ -45,15 +53,18 @@ class CustomSX1268 : public SX1268 {
       int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
       // if radio init fails with -707/-706, try again with tcxo voltage set to 0.0f
       if (status == RADIOLIB_ERR_SPI_CMD_FAILED || status == RADIOLIB_ERR_SPI_CMD_INVALID) {
-        #define SX126X_DIO3_TCXO_VOLTAGE (0.0f);
-        tcxo = SX126X_DIO3_TCXO_VOLTAGE;
-        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
+        Serial.println("[LoRa] First begin() failed, retrying with TCXO=0.0V...");
+        // Force chip to standby before retry
+        standby();
+        delay(10);
+        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, 0.0f);
       }
       if (status != RADIOLIB_ERR_NONE) {
         Serial.print("ERROR: radio init failed: ");
         Serial.println(status);
         return false;  // fail
       }
+      Serial.println("[LoRa] begin() succeeded");
     
       setCRC(1);
   

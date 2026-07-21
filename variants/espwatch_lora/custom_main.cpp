@@ -7,6 +7,7 @@ StdRNG fast_rng;
 SimpleMeshTables tables;
 
 static unsigned long next_refresh = 0;
+static volatile bool _new_message = false;  // 收到新消息标志
 
 // 屏幕休眠状态（CUSTOM_BOARD）
 static unsigned long _last_activity = 0;
@@ -17,7 +18,7 @@ static volatile bool _g0_pressed = false;  // GPIO0 中断标志
 static const uint16_t _timeout_options[] = {0, 10, 30, 60, 120, 300};
 static const int _timeout_options_count = sizeof(_timeout_options) / sizeof(_timeout_options[0]);
 static const char* _timeout_labels[] = {"Never", "10s", "30s", "1m", "2m", "5m"};
-static int _timeout_selected_idx = 1;  // 默认 10s
+static int _timeout_selected_idx = 1;  // 默认 10s，setup() 中会从 NodePrefs 加载
 static bool _in_timeout_select = false;  // 是否正在选择超时选项
 
 // 时间设置状态
@@ -47,9 +48,27 @@ static unsigned long get_screen_timeout_ms() {
   ArduinoSerialInterface serial_interface;
 #endif
 
+// 简单的 UITask 实现，用于接收消息通知
+class SimpleUITask : public AbstractUITask {
+public:
+    SimpleUITask() : AbstractUITask(nullptr, nullptr) {}
+    
+    void msgRead(int msgcount) override {}
+    void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override {
+        _new_message = true;
+    }
+    void onDiscoveredContact(ContactInfo& ci, bool is_new, uint8_t path_len, const uint8_t* path) {
+        _new_message = true;  // 收到 advert 后也刷新页面
+    }
+    void notify(UIEventType t = UIEventType::none) override {}
+    void loop() override {}
+};
+
+static SimpleUITask ui_task;
+
 MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
 #ifdef DISPLAY_CLASS
-   , nullptr
+   , &ui_task
 #endif
 );
 
@@ -109,6 +128,13 @@ void setup() {
   SPIFFS.begin(true);
 #endif
   store.begin();
+
+  // 删除旧的身份文件，确保每次烧录后设备生成新的唯一密钥对
+  // 这样多台设备烧录同一固件时，每台设备都会有独立的公钥/私钥
+//   if (SPIFFS.exists("/identity/_main.id")) {
+//     SPIFFS.remove("/identity/_main.id");
+//     Serial.println("[INFO] Removed old identity file, will generate new keypair");
+//   }
 
   the_mesh.begin(
 #ifdef DISPLAY_CLASS
@@ -456,13 +482,13 @@ void render_contacts() {
         display.print(filtered);
 
         // 路径跳数
-        snprintf(buf, sizeof(buf), "%d hops", contact.out_path_len);
+        snprintf(buf, sizeof(buf), "%dhops", contact.out_path_len);
         if (is_selected) {
             display.setColor(DisplayDriver::BLUE);
         } else {
             display.setColor(DisplayDriver::YELLOW);
         }
-        display.setCursor(200, y + 7);
+        display.setCursor(190, y + 7);
         display.print(buf);
 
         // 最后见时间
@@ -592,54 +618,54 @@ void render_chat() {
     display.setCursor(14, y + 18);
     snprintf(buf, sizeof(buf), "Node: %s", the_mesh.getNodeName());
     display.print(buf);
-    display.setColor(DisplayDriver::LIGHT);
-    display.fillRect(8, y + BUBBLE_H, 224, 1);
+    // display.setColor(DisplayDriver::LIGHT);
+    // display.fillRect(8, y + BUBBLE_H, 224, 1);
 
     // 气泡 2：当前聊天对象信息
-    if (_chat_parent == MenuScreen::CONTACTS && num_contacts > 0) {
-        ContactInfo c;
-        if (the_mesh.getContactByIdx(_contacts_selected, c)) {
-            y += BUBBLE_H + 3;
-            display.setColor(DisplayDriver::GREEN);
-            display.fillRect(8, y, 224, BUBBLE_H);
-            display.setColor(DisplayDriver::DARK);
-            display.setCursor(14, y + 6);
-            snprintf(buf, sizeof(buf), "Peer: %s", c.name);
-            display.print(buf);
-            display.setCursor(14, y + 18);
-            snprintf(buf, sizeof(buf), "%d hops · %us ago", c.out_path_len,
-                     (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
-            display.print(buf);
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(8, y + BUBBLE_H, 224, 1);
-        }
-    } else {
-        y += BUBBLE_H + 3;
-        display.setColor(DisplayDriver::GREEN);
-        display.fillRect(8, y, 224, BUBBLE_H);
-        display.setColor(DisplayDriver::DARK);
-        display.setCursor(14, y + 6);
-        snprintf(buf, sizeof(buf), "Channel: %s", title_buf);
-        display.print(buf);
-        display.setCursor(14, y + 18);
-        snprintf(buf, sizeof(buf), "%d peers in network", num_contacts);
-        display.print(buf);
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(8, y + BUBBLE_H, 224, 1);
-    }
+    // if (_chat_parent == MenuScreen::CONTACTS && num_contacts > 0) {
+    //     ContactInfo c;
+    //     if (the_mesh.getContactByIdx(_contacts_selected, c)) {
+    //         y += BUBBLE_H + 3;
+    //         display.setColor(DisplayDriver::GREEN);
+    //         display.fillRect(8, y, 224, BUBBLE_H);
+    //         display.setColor(DisplayDriver::DARK);
+    //         display.setCursor(14, y + 6);
+    //         snprintf(buf, sizeof(buf), "Peer: %s", c.name);
+    //         display.print(buf);
+    //         display.setCursor(14, y + 18);
+    //         snprintf(buf, sizeof(buf), "%d hops · %us ago", c.out_path_len,
+    //                  (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
+    //         display.print(buf);
+    //         // display.setColor(DisplayDriver::LIGHT);
+    //         // display.fillRect(8, y + BUBBLE_H, 224, 1);
+    //     }
+    // } else {
+    //     y += BUBBLE_H + 3;
+    //     display.setColor(DisplayDriver::GREEN);
+    //     display.fillRect(8, y, 224, BUBBLE_H);
+    //     display.setColor(DisplayDriver::DARK);
+    //     display.setCursor(14, y + 6);
+    //     snprintf(buf, sizeof(buf), "Channel: %s", title_buf);
+    //     display.print(buf);
+    //     display.setCursor(14, y + 18);
+    //     snprintf(buf, sizeof(buf), "%d peers in network", num_contacts);
+    //     display.print(buf);
+    //     // display.setColor(DisplayDriver::LIGHT);
+    //     // display.fillRect(8, y + BUBBLE_H, 224, 1);
+    // }
 
     // 气泡 3：运行时间
-    y += BUBBLE_H + 3;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(8, y, 224, BUBBLE_H);
-    display.setColor(DisplayDriver::LIGHT);
-    display.setCursor(14, y + 6);
-    snprintf(buf, sizeof(buf), "Uptime: %ldmin", uptime / 60);
-    display.print(buf);
-    display.setCursor(14, y + 18);
-    snprintf(buf, sizeof(buf), "Msg queue: %d pending", (int)the_mesh.getNumContacts());
-    display.print(buf);
-    display.fillRect(8, y + BUBBLE_H, 224, 1);
+    // y += BUBBLE_H + 3;
+    // display.setColor(DisplayDriver::LIGHT);
+    // display.drawRect(8, y, 224, BUBBLE_H);
+    // display.setColor(DisplayDriver::LIGHT);
+    // display.setCursor(14, y + 6);
+    // snprintf(buf, sizeof(buf), "Uptime: %ldmin", uptime / 60);
+    // display.print(buf);
+    // display.setCursor(14, y + 18);
+    // snprintf(buf, sizeof(buf), "Msg queue: %d pending", (int)the_mesh.getNumContacts());
+    // display.print(buf);
+    // display.fillRect(8, y + BUBBLE_H, 224, 1);
 
     // 气泡 4：最新节点（如果有联系人）
     if (num_contacts > 0) {
@@ -660,8 +686,8 @@ void render_chat() {
             snprintf(buf, sizeof(buf), "Seen: %us ago", (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
             display.print(buf);
         }
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(8, y + BUBBLE_H, 224, 1);
+        // display.setColor(DisplayDriver::LIGHT);
+        // display.fillRect(8, y + BUBBLE_H, 224, 1);
     }
 }
 
@@ -1117,6 +1143,12 @@ void loop() {
 #endif
 
   the_mesh.loop();
+
+  // 收到新消息时刷新页面
+  if (_new_message) {
+    _new_message = false;
+    next_refresh = 0;  // 立即刷新
+  }
 
 #ifdef BLE_PIN_CODE
   // 检查蓝牙连接后是否需要自动同步时间

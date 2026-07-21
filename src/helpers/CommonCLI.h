@@ -12,26 +12,41 @@
 #define ADVERT_LOC_SHARE      1
 #define ADVERT_LOC_PREFS      2
 
-struct NodePrefs { // persisted to file
-  float airtime_factor;
-  char node_name[32];
-  double node_lat, node_lon;
+struct NodePrefs { // persisted to file - must match DataStore.cpp layout
+  float airtime_factor;          // offset 0
+  char node_name[32];            // offset 4
+  // 4 bytes padding (was password[16] first 4 bytes)
+  double node_lat, node_lon;     // offset 40
+  float freq;                    // offset 56
+  uint8_t sf;                    // offset 60
+  uint8_t cr;                    // offset 61
+  // 1 byte padding
+  uint8_t manual_add_contacts;   // offset 63
+  float bw;                      // offset 64
+  uint8_t tx_power_dbm;          // offset 68
+  uint8_t telemetry_mode_base;   // offset 69
+  uint8_t telemetry_mode_loc;    // offset 70
+  uint8_t telemetry_mode_env;    // offset 71
+  float rx_delay_base;           // offset 72
+  uint8_t advert_loc_policy;     // offset 76
+  uint8_t multi_acks;            // offset 77
+  // 2 bytes padding
+  uint32_t ble_pin;              // offset 80
+  uint8_t buzzer_quiet;          // offset 84
+  uint8_t gps_enabled;           // offset 85
+  // 2 bytes padding
+  uint16_t screen_timeout_seconds; // offset 88
+
+  // Fields not persisted in new_prefs format (used by CLI only)
   char password[16];
-  float freq;
-  uint8_t tx_power_dbm;
   uint8_t disable_fwd;
   uint8_t advert_interval;       // minutes / 2
   uint8_t flood_advert_interval; // hours
-  float rx_delay_base;
   float tx_delay_factor;
   char guest_password[16];
   float direct_tx_delay_factor;
   uint32_t guard;
-  uint8_t sf;
-  uint8_t cr;
   uint8_t allow_read_only;
-  uint8_t multi_acks;
-  float bw;
   uint8_t flood_max;
   uint8_t interference_threshold;
   uint8_t agc_reset_interval; // secs / 4
@@ -43,9 +58,7 @@ struct NodePrefs { // persisted to file
   uint8_t bridge_channel; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Gps settings
-  uint8_t gps_enabled;
   uint32_t gps_interval; // in seconds
-  uint8_t advert_loc_policy;
   uint32_t discovery_mod_timestamp;
   float adc_multiplier;
 };
