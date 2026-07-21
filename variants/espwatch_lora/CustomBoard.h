@@ -107,7 +107,7 @@ public:
   /**
    * Read battery SoC (State of Charge) from CW2015 if available.
    * Uses voltage-based estimation for more reliable readings.
-   * LiPo battery: 3.0V = 0%, 3.7V = ~50%, 4.2V = 100%
+   * LiPo battery: 3.0V = 0%, 3.7V = ~50%, 4.1V = 100%
    */
   uint8_t getBattPercent() {
     uint16_t voltage_mv = getBattMilliVolts();
@@ -115,11 +115,11 @@ public:
     // Voltage-based estimation for LiPo battery
     if (voltage_mv <= 3000) {
       return 0;
-    } else if (voltage_mv >= 4200) {
+    } else if (voltage_mv >= 4100) {
       return 100;
     } else if (voltage_mv >= 3700) {
-      // 3.7V - 4.2V: linear 50% - 100%
-      return 50 + (voltage_mv - 3700) * 50 / 500;
+      // 3.7V - 4.1V: linear 50% - 100%
+      return 50 + (voltage_mv - 3700) * 50 / 400;
     } else {
       // 3.0V - 3.7V: linear 0% - 50%
       return (voltage_mv - 3000) * 50 / 700;

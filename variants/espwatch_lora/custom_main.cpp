@@ -20,6 +20,13 @@ static const char* _timeout_labels[] = {"Never", "10s", "30s", "1m", "2m", "5m"}
 static int _timeout_selected_idx = 1;  // 默认 10s
 static bool _in_timeout_select = false;  // 是否正在选择超时选项
 
+// 时间设置状态
+static bool _in_time_set = false;  // 是否正在设置时间
+static int _time_edit_field = 0;   // 0=小时, 1=分钟
+static bool _time_editing = false;  // 是否已进入编辑模式（选中时/分后）
+static int _time_edit_hour = 0;
+static int _time_edit_minute = 0;
+
 // 获取当前屏幕休眠超时毫秒值
 static unsigned long get_screen_timeout_ms() {
     uint16_t secs = _timeout_options[_timeout_selected_idx];
@@ -137,6 +144,7 @@ void setup() {
 
 // ========= 状态变量（模仿 cardputer 的 MenuScreen + SettingsCategory） =========
 enum class MenuScreen {
+    HOME,
     CONTACTS,
     CHANNELS,
     CHAT,
@@ -152,7 +160,7 @@ enum class SettingsCategory {
     DEVICE_INFO
 };
 
-static MenuScreen _menu_state = MenuScreen::CONTACTS;
+static MenuScreen _menu_state = MenuScreen::HOME;
 static MenuScreen _chat_parent = MenuScreen::CONTACTS;  // chat 页的来源（用于返回）
 static SettingsCategory _settings_category = SettingsCategory::MAIN_MENU;
 static int _settings_menu_idx = 0;       // 设置项索引（滚动位置）
@@ -230,6 +238,10 @@ void draw_header(const char* title) {
 }
 
 void draw_tab_bar() {
+    // Home 页：不显示 tab bar
+    if (_menu_state == MenuScreen::HOME) {
+        return;
+    }
     // Chat 页：不显示 tab bar，显示返回提示
     if (_menu_state == MenuScreen::CHAT) {
         // int bar_y = 258;
@@ -242,19 +254,19 @@ void draw_tab_bar() {
         return;
     }
 
-    // 底部 tab bar (0, 258, 240, 27) - 3个tab，不含 Chat
+    // 底部 tab bar (0, 258, 240, 27) - 4个tab
     int bar_y = 258;
     display.setColor(DisplayDriver::LIGHT);
     display.drawRect(0, bar_y, 240, 27);
 
     display.setTextSize(1);
 
-    // 3个tab，每个80像素宽 — Chat 是联系人/频道内的子功能，不是顶级 tab
-    const int TAB_W = 80;
-    const char* tab_names[] = {"Contacts", "Channels", "Settings"};
-    MenuScreen tab_states[] = {MenuScreen::CONTACTS, MenuScreen::CHANNELS, MenuScreen::SETTINGS};
+    // 4个tab，每个60像素宽
+    const int TAB_W = 60;
+    const char* tab_names[] = {"Home", "Contacts", "Channels", "Settings"};
+    MenuScreen tab_states[] = {MenuScreen::HOME, MenuScreen::CONTACTS, MenuScreen::CHANNELS, MenuScreen::SETTINGS};
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         int tab_x = i * TAB_W;
         if (_menu_state == tab_states[i]) {
             display.setColor(DisplayDriver::LIGHT);
@@ -288,6 +300,101 @@ void draw_settings_bottom_menu(bool in_sub) {
     display.setColor(DisplayDriver::YELLOW);
     display.setCursor(133, bar_y + 7);
     display.print("Next");
+}
+
+// ========= PAGE 0: HOME（数字表盘） =========
+void render_home() {
+    char num_buf[16];
+    const int TIME_TEXT_SIZE = 7;
+    const int DATE_TEXT_SIZE = 2;
+    const int CHAR_W = 6;  // (5+1) * 1
+
+    // 获取当前时间
+    uint32_t now_secs = rtc_clock.getCurrentTime();
+    int h = (now_secs / 3600) % 24;
+    int m = (now_secs % 3600) / 60;
+
+    // 时间 "HH:MM" 居中
+    int time_str_w = 5 * CHAR_W * TIME_TEXT_SIZE;  // "00:00" = 5 chars
+    int time_x = (240 - time_str_w) / 2;
+    int time_y = 100;
+
+    display.setTextSize(TIME_TEXT_SIZE);
+    display.setColor(DisplayDriver::LIGHT);
+    display.setCursor(time_x, time_y);
+    snprintf(num_buf, sizeof(num_buf), "%02d", h);
+    display.print(num_buf);
+    display.print(":");
+    snprintf(num_buf, sizeof(num_buf), "%02d", m);
+    display.print(num_buf);
+
+    // 日期 "YYYY-MM-DD" 居中，在时间正下方
+    int date_str_len = 10;  // "YYYY-MM-DD"
+    int date_str_w = date_str_len * CHAR_W * DATE_TEXT_SIZE;
+    int date_x = (240 - date_str_w) / 2;
+    int date_y = time_y + CHAR_W * TIME_TEXT_SIZE + 30;
+
+    display.setTextSize(DATE_TEXT_SIZE);
+    display.setCursor(date_x, date_y);
+    // 计算日期（从 epoch 秒数）
+    int days = now_secs / 86400;
+    int y = 1970;
+    int mon = 1;
+    int d = 1;
+    // 简化计算：从 1970-01-01 开始累加天数
+    {
+        int remaining_days = days;
+        // 年份
+        while (1) {
+            bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+            int ydays = leap ? 366 : 365;
+            if (remaining_days < ydays) break;
+            remaining_days -= ydays;
+            y++;
+        }
+        // 月份
+        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        const int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        int feb = leap ? 29 : 28;
+        for (mon = 0; mon < 12; mon++) {
+            int md = (mon == 1) ? feb : mdays[mon];
+            if (remaining_days < md) break;
+            remaining_days -= md;
+        }
+        mon++;  // 1-based
+        d = remaining_days + 1;
+    }
+    snprintf(num_buf, sizeof(num_buf), "%04d-%d-%d", y, mon, d);
+    display.print(num_buf);
+
+    // 右上角：电量数值 + 电池图标
+    uint8_t batt = board.getBattPercent();
+    char batt_buf[8];
+    snprintf(batt_buf, sizeof(batt_buf), "%d", batt);
+    display.setTextSize(1);
+    int text_w = strlen(batt_buf) * 6;
+    display.setColor(DisplayDriver::LIGHT);
+    display.setCursor(198 - text_w, 11);
+    display.print(batt_buf);
+
+    // 电池图标
+    int bat_x = 200;
+    int bat_y = 9;
+    int bat_w = 22;
+    int bat_h = 10;
+    display.setColor(DisplayDriver::GREEN);
+    display.drawRect(bat_x, bat_y, bat_w, bat_h);
+    display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
+    int fill_w = (bat_w - 2) * batt / 100;
+    if (fill_w > 0) {
+        display.fillRect(bat_x + 1, bat_y + 1, fill_w, bat_h - 2);
+    }
+    if (batt <= 20) {
+        display.setColor(DisplayDriver::RED);
+        display.drawRect(bat_x, bat_y, bat_w, bat_h);
+        display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
+    }
+    display.setColor(DisplayDriver::LIGHT);
 }
 
 // ========= PAGE 1: CONTACTS =========
@@ -712,6 +819,21 @@ void render_settings_other() {
 
     int y = 40;
 
+    // 显示当前时间
+    uint32_t now_secs = rtc_clock.getCurrentTime();
+    int h = (now_secs / 3600) % 24;
+    int m = (now_secs % 3600) / 60;
+    char time_buf[16];
+    snprintf(time_buf, sizeof(time_buf), "%02d:%02d", h, m);
+
+    display.setTextSize(1);
+    display.setCursor(10, y + 6);
+    display.print("Set Time");
+    display.setTextSize(2);
+    display.setCursor(10, y + 18);
+    display.print(time_buf);
+
+    y += 34;
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Battery");
@@ -727,6 +849,112 @@ void render_settings_other() {
     display.setColor(DisplayDriver::RED);
     display.setCursor(10, y + 18);
     display.print("Hold to reset");
+}
+
+// 渲染时间设置界面
+void render_time_set() {
+    draw_header("Set Time");
+
+    char num_buf[8];
+    const int TEXT_SIZE = 6;
+    const int CHAR_W = 6;  // (5+1) * 1
+    const int TIME_STR_WIDTH = 5 * CHAR_W * TEXT_SIZE;  // "00:00" = 5 chars
+    const int TIME_X = (240 - TIME_STR_WIDTH) / 2;  // 居中 x = 30
+    const int TIME_Y = 70;
+
+    display.setTextSize(TEXT_SIZE);
+
+    // 高亮当前编辑字段
+    if (_time_editing) {
+        if (_time_edit_field == 0) {
+            // 编辑小时 - 白色高亮
+            int hour_w = 2 * CHAR_W * TEXT_SIZE;  // "00"
+            display.setColor(DisplayDriver::LIGHT);
+            display.fillRect(TIME_X, TIME_Y, hour_w, CHAR_W * TEXT_SIZE);
+            display.setColor(DisplayDriver::DARK);
+            display.setCursor(TIME_X, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
+            display.print(num_buf);
+            // 冒号
+            display.setColor(DisplayDriver::LIGHT);
+            display.setCursor(TIME_X + hour_w, TIME_Y);
+            display.print(":");
+            // 分钟
+            display.setCursor(TIME_X + hour_w + CHAR_W * TEXT_SIZE, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
+            display.print(num_buf);
+        } else {
+            // 编辑分钟 - 白色高亮
+            int hour_w = 2 * CHAR_W * TEXT_SIZE;
+            int colon_w = CHAR_W * TEXT_SIZE;
+            // 小时
+            display.setColor(DisplayDriver::LIGHT);
+            display.setCursor(TIME_X, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
+            display.print(num_buf);
+            // 冒号
+            display.setCursor(TIME_X + hour_w, TIME_Y);
+            display.print(":");
+            // 分钟高亮
+            int min_x = TIME_X + hour_w + colon_w;
+            int min_w = 2 * CHAR_W * TEXT_SIZE;
+            display.setColor(DisplayDriver::LIGHT);
+            display.fillRect(min_x, TIME_Y, min_w, CHAR_W * TEXT_SIZE);
+            display.setColor(DisplayDriver::DARK);
+            display.setCursor(min_x, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
+            display.print(num_buf);
+        }
+    } else {
+        // 未进入编辑模式，用蓝色高亮当前选中的字段
+        if (_time_edit_field == 0) {
+            // 选中小时 - 蓝色高亮
+            int hour_w = 2 * CHAR_W * TEXT_SIZE;
+            display.setColor(DisplayDriver::BLUE);
+            display.fillRect(TIME_X, TIME_Y, hour_w, CHAR_W * TEXT_SIZE);
+            display.setColor(DisplayDriver::LIGHT);
+            display.setCursor(TIME_X, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
+            display.print(num_buf);
+            // 冒号
+            display.setCursor(TIME_X + hour_w, TIME_Y);
+            display.print(":");
+            // 分钟
+            display.setCursor(TIME_X + hour_w + CHAR_W * TEXT_SIZE, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
+            display.print(num_buf);
+        } else {
+            // 选中分钟 - 蓝色高亮
+            int hour_w = 2 * CHAR_W * TEXT_SIZE;
+            int colon_w = CHAR_W * TEXT_SIZE;
+            // 小时
+            display.setColor(DisplayDriver::LIGHT);
+            display.setCursor(TIME_X, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
+            display.print(num_buf);
+            // 冒号
+            display.setCursor(TIME_X + hour_w, TIME_Y);
+            display.print(":");
+            // 分钟高亮
+            int min_x = TIME_X + hour_w + colon_w;
+            int min_w = 2 * CHAR_W * TEXT_SIZE;
+            display.setColor(DisplayDriver::BLUE);
+            display.fillRect(min_x, TIME_Y, min_w, CHAR_W * TEXT_SIZE);
+            display.setColor(DisplayDriver::LIGHT);
+            display.setCursor(min_x, TIME_Y);
+            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
+            display.print(num_buf);
+        }
+    }
+
+    // 提示
+    display.setTextSize(1);
+    display.setCursor(10, 160);
+    if (!_time_editing) {
+        display.print("G0: Select  G45: Switch field");
+    } else {
+        display.print("G0: +1  G45: -1  Long: Save");
+    }
 }
 
 // 渲染超时选项选择界面
@@ -798,7 +1026,9 @@ void render_settings_device_info() {
 }
 
 void render_settings() {
-    if (_in_timeout_select) {
+    if (_in_time_set) {
+        render_time_set();
+    } else if (_in_timeout_select) {
         render_timeout_select();
     } else if (!_settings_selected) {
         render_settings_main_menu();
@@ -835,6 +1065,9 @@ void draw_status_screen() {
 
     // === 画正式页面内容 ===
     switch (_menu_state) {
+        case MenuScreen::HOME:
+            render_home();
+            break;
         case MenuScreen::CONTACTS:
             render_contacts();
             break;
@@ -940,7 +1173,28 @@ void loop() {
         return;
     }
 
-    if (_menu_state == MenuScreen::SETTINGS && !_settings_selected) {
+    // 处理时间设置模式
+    if (_in_time_set) {
+        if (!_time_editing) {
+            // 未编辑状态：G45 切换时/分字段
+            _time_edit_field = (_time_edit_field + 1) % 2;
+        } else {
+            // 编辑状态：G45 递减
+            if (_time_edit_field == 0) {
+                _time_edit_hour = (_time_edit_hour + 23) % 24;  // -1 等价于 +23
+            } else {
+                _time_edit_minute = (_time_edit_minute + 59) % 60;  // -1 等价于 +59
+            }
+        }
+        draw_status_screen();
+        return;
+    }
+
+    if (_menu_state == MenuScreen::HOME) {
+        // Home：进入 Contacts
+        _menu_state = MenuScreen::CONTACTS;
+        Serial.println("[UI] G45: Home -> Contacts");
+    } else if (_menu_state == MenuScreen::SETTINGS && !_settings_selected) {
         // 设置主菜单：向下滚动选中项
         const int num_cats = 5;
         _settings_menu_idx = (_settings_menu_idx + 1) % num_cats;
@@ -985,12 +1239,31 @@ void loop() {
     next_refresh = now + 60000;
   }
 
-  // --- G0 长按（返回上一级）- 必须在 CLICK 之前处理 ---
+  // --- G0 长按（返回上一级 / 保存时间）- 必须在 CLICK 之前处理 ---
   if (btn_g0 == BUTTON_EVENT_LONG_PRESS) {
     board.beep(200, 1000);
     user_btn.cancelClick();  // 阻止松开时触发 CLICK
 
-    // 处理超时选择模式：取消选择，返回 Other 设置页
+    // 处理时间设置模式：长按保存时间并退出
+    if (_in_time_set) {
+        // 计算新的时间戳
+        uint32_t now_secs = rtc_clock.getCurrentTime();
+        int cur_h = (now_secs / 3600) % 24;
+        int cur_m = (now_secs % 3600) / 60;
+        int cur_s = now_secs % 60;
+        // 用当前日期部分 + 新的小时/分钟
+        int days = now_secs / 86400;
+        uint32_t new_secs = (uint32_t)days * 86400 + (uint32_t)_time_edit_hour * 3600 + (uint32_t)_time_edit_minute * 60 + cur_s;
+        rtc_clock.setCurrentTime(new_secs);
+        _in_time_set = false;
+        _time_editing = false;
+        Serial.printf("[UI] G0 long: Time set to %02d:%02d (epoch=%lu)\n", _time_edit_hour, _time_edit_minute, new_secs);
+        draw_status_screen();
+        next_refresh = now + 60000;
+        return;
+    }
+
+    // 处理超时选择模式：取消选择，返回 Theme 设置页
     if (_in_timeout_select) {
         _in_timeout_select = false;
         Serial.println("[UI] G0 long: Cancel timeout selection");
@@ -1018,9 +1291,13 @@ void loop() {
         _menu_state = MenuScreen::CONTACTS;
         Serial.println("[UI] G0 long: Channels -> Contacts");
     } else if (_menu_state == MenuScreen::CONTACTS) {
-        // Contacts：返回 Settings（循环）
+        // Contacts：返回 Home
+        _menu_state = MenuScreen::HOME;
+        Serial.println("[UI] G0 long: Contacts -> Home");
+    } else if (_menu_state == MenuScreen::HOME) {
+        // Home：进入 Settings（循环）
         _menu_state = MenuScreen::SETTINGS;
-        Serial.println("[UI] G0 long: Contacts -> Settings");
+        Serial.println("[UI] G0 long: Home -> Settings");
     }
 
     draw_status_screen();
@@ -1030,6 +1307,26 @@ void loop() {
   // --- G0 (Enter / Select) ---
   if (btn_g0 == BUTTON_EVENT_CLICK) {
     board.beep(100, 2000);
+
+    // 处理时间设置模式
+    if (_in_time_set) {
+        if (!_time_editing) {
+            // 未编辑状态：G0 进入编辑模式，初始化当前值
+            _time_editing = true;
+            uint32_t now_secs = rtc_clock.getCurrentTime();
+            _time_edit_hour = (now_secs / 3600) % 24;
+            _time_edit_minute = (now_secs % 3600) / 60;
+        } else {
+            // 编辑状态：G0 递增
+            if (_time_edit_field == 0) {
+                _time_edit_hour = (_time_edit_hour + 1) % 24;
+            } else {
+                _time_edit_minute = (_time_edit_minute + 1) % 60;
+            }
+        }
+        draw_status_screen();
+        return;
+    }
 
     // 处理超时选择模式：确认选择并返回 Theme 设置页
     if (_in_timeout_select) {
@@ -1066,9 +1363,26 @@ void loop() {
                 next_refresh = now + 60000;
                 return;
             }
+            // 在子分类中：如果是 Other 页面，进入时间设置模式
+            if (_settings_category == SettingsCategory::OTHER) {
+                _in_time_set = true;
+                _time_edit_field = 0;
+                _time_editing = false;
+                uint32_t now_secs = rtc_clock.getCurrentTime();
+                _time_edit_hour = (now_secs / 3600) % 24;
+                _time_edit_minute = (now_secs % 3600) / 60;
+                Serial.println("[UI] G0: Enter time set");
+                draw_status_screen();
+                next_refresh = now + 60000;
+                return;
+            }
             _settings_selected = false;
             Serial.println("[UI] G0: Back to main settings");
         }
+    } else if (_menu_state == MenuScreen::HOME) {
+        // Home 页：进入 Settings
+        _menu_state = MenuScreen::SETTINGS;
+        Serial.println("[UI] G0: Home -> Settings");
     } else if (_menu_state == MenuScreen::CONTACTS) {
         // Contacts 页：进入选中联系人的聊天
         int num_contacts = the_mesh.getNumContacts();
