@@ -109,6 +109,7 @@
 #define PUSH_CODE_BINARY_RESPONSE       0x8C
 #define PUSH_CODE_PATH_DISCOVERY_RESPONSE 0x8D
 #define PUSH_CODE_CONTROL_DATA          0x8E   // v8+
+#define PUSH_CODE_TIME_SYNC_REQUEST     0x8F   // 设备请求客户端同步时间
 
 #define ERR_CODE_UNSUPPORTED_CMD        1
 #define ERR_CODE_NOT_FOUND              2
@@ -1074,9 +1075,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t secs;
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
-    if (secs >= curr) {
+    // 允许设置任意时间（包括更旧的时间），因为设备冷启动时的默认时间可能不准确
+    // 只有当设置的时间比当前时间更新，或者当前时间是默认时间时才接受
+    bool is_default_time = (curr < 1700000000);  // 2023年11月之前的时间认为是默认时间
+    if (secs >= curr || is_default_time) {
       getRTCClock()->setCurrentTime(secs);
       writeOKFrame();
+      Serial.printf("[TIME] Clock set to: %lu (was %lu)\n", secs, curr);
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }

@@ -100,6 +100,9 @@ public:
       tv.tv_sec = 1715770351;  // 15 May 2024, 8:50pm
       tv.tv_usec = 0;
       settimeofday(&tv, NULL);
+      // Set timezone to Hong Kong (UTC+8)
+      setenv("TZ", "HKT-8", 1);
+      tzset();
     }
   }
   uint32_t getCurrentTime() override {

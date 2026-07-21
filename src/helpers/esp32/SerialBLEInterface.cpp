@@ -70,6 +70,7 @@ void SerialBLEInterface::onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {
   if (cmpl.success) {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Success");
     deviceConnected = true;
+    _time_sync_pending = true;  // 标记需要同步时间
   } else {
     BLE_DEBUG_PRINTLN(" - SecurityCallback - Authentication Failure*");
 
@@ -249,4 +250,30 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
 
 bool SerialBLEInterface::isConnected() const {
   return deviceConnected;  //pServer != NULL && pServer->getConnectedCount() > 0;
+}
+
+// 检查并处理蓝牙连接后的时间同步
+// 返回 true 表示已发送时间同步请求，调用方应将请求写入设备
+bool SerialBLEInterface::checkAndRequestTimeSync() {
+  if (!_time_sync_pending) {
+    return false;
+  }
+  
+  // 检查是否已连接且发送队列有空闲
+  if (!deviceConnected || send_queue_len >= FRAME_QUEUE_SIZE) {
+    return false;
+  }
+  
+  // 清除待同步标志
+  _time_sync_pending = false;
+  
+  BLE_DEBUG_PRINTLN("checkAndRequestTimeSync: sending time sync request");
+  
+  // 构建 PUSH_CODE_TIME_SYNC_REQUEST 推送帧
+  // 帧格式: [PUSH_CODE_TIME_SYNC_REQUEST] (1字节)
+  // 客户端收到后应回复 CMD_SET_DEVICE_TIME
+  uint8_t time_req[1];
+  time_req[0] = 0x8F;  // PUSH_CODE_TIME_SYNC_REQUEST
+  
+  return writeFrame(time_req, sizeof(time_req)) > 0;
 }

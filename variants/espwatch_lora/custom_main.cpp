@@ -13,7 +13,19 @@ static unsigned long _last_activity = 0;
 static bool _screen_off = false;
 static bool _just_woken = false;
 static volatile bool _g0_pressed = false;  // GPIO0 中断标志
-#define SCREEN_TIMEOUT_MS  10000
+// 屏幕休眠超时选项（秒）
+static const uint16_t _timeout_options[] = {0, 10, 30, 60, 120, 300};
+static const int _timeout_options_count = sizeof(_timeout_options) / sizeof(_timeout_options[0]);
+static const char* _timeout_labels[] = {"Never", "10s", "30s", "1m", "2m", "5m"};
+static int _timeout_selected_idx = 1;  // 默认 10s
+static bool _in_timeout_select = false;  // 是否正在选择超时选项
+
+// 获取当前屏幕休眠超时毫秒值
+static unsigned long get_screen_timeout_ms() {
+    uint16_t secs = _timeout_options[_timeout_selected_idx];
+    if (secs == 0) return 0;  // Never
+    return (unsigned long)secs * 1000UL;
+}
 
 #if defined(ESP32)
   #include <SPIFFS.h>
@@ -105,6 +117,16 @@ void setup() {
   serial_interface.begin(Serial);
 #endif
   the_mesh.startInterface(serial_interface);
+
+  // 从持久化设置加载屏幕休眠超时
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  uint16_t saved_timeout = prefs->screen_timeout_seconds;
+  for (int i = 0; i < _timeout_options_count; i++) {
+    if (_timeout_options[i] == saved_timeout) {
+      _timeout_selected_idx = i;
+      break;
+    }
+  }
 
   Serial.println("Boot complete");
 }
@@ -657,6 +679,9 @@ void render_settings_theme() {
     display.setTextSize(2);
     display.setCursor(10, y + 18);
     display.print("5%");
+    // 白色下边线
+    // display.setColor(DisplayDriver::LIGHT);
+    // display.fillRect(4, y + 38, 232, 1);
 
     y += 34;
     display.setTextSize(1);
@@ -666,15 +691,20 @@ void render_settings_theme() {
     display.setColor(DisplayDriver::BLUE);
     display.setCursor(10, y + 18);
     display.print("BLUE");
+    // 白色下边线
+    // display.setColor(DisplayDriver::LIGHT);
+    // display.fillRect(4, y + 38, 232, 1);
 
     y += 34;
+    display.setColor(DisplayDriver::LIGHT);
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Screen Timeout");
     display.setTextSize(2);
-    display.setColor(DisplayDriver::LIGHT);
     display.setCursor(10, y + 18);
-    display.print("Never");
+    display.print(_timeout_labels[_timeout_selected_idx]);
+    // 白色下边线
+    display.fillRect(4, y + 38, 232, 1);
 }
 
 void render_settings_other() {
@@ -682,14 +712,6 @@ void render_settings_other() {
 
     int y = 40;
 
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Screen Timeout");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print("Never");
-
-    y += 34;
     display.setTextSize(1);
     display.setCursor(10, y + 6);
     display.print("Battery");
@@ -705,6 +727,33 @@ void render_settings_other() {
     display.setColor(DisplayDriver::RED);
     display.setCursor(10, y + 18);
     display.print("Hold to reset");
+}
+
+// 渲染超时选项选择界面
+void render_timeout_select() {
+    draw_header("Screen Timeout");
+
+    const int ITEM_H = 28;
+    int y_start = 40;
+
+    for (int i = 0; i < _timeout_options_count; i++) {
+        int y = y_start + i * ITEM_H;
+
+        // 选中项高亮
+        if (i == _timeout_selected_idx) {
+            display.setColor(DisplayDriver::LIGHT);
+            display.fillRect(4, y, 232, ITEM_H - 2);
+            display.setColor(DisplayDriver::DARK);
+        }
+
+        display.setTextSize(2);
+        display.setCursor(10, y + 7);
+        display.print(_timeout_labels[i]);
+
+        // 白色下边线
+        display.setColor(DisplayDriver::LIGHT);
+        display.fillRect(4, y + ITEM_H - 2, 232, 1);
+    }
 }
 
 void render_settings_device_info() {
@@ -749,7 +798,9 @@ void render_settings_device_info() {
 }
 
 void render_settings() {
-    if (!_settings_selected) {
+    if (_in_timeout_select) {
+        render_timeout_select();
+    } else if (!_settings_selected) {
         render_settings_main_menu();
     } else {
         switch (_settings_category) {
@@ -827,8 +878,6 @@ void loop() {
       _last_activity = millis();  // ← 重置休眠计时器
       Serial.println("[UI] Screen wake by G0");
       display.turnOn();
-    //   draw_status_screen();
-    //   next_refresh = millis() + 60000;  // ← 设置下次刷新时间
     }
     return;  // ← 继续休眠循环
   }
@@ -836,10 +885,17 @@ void loop() {
 
   the_mesh.loop();
 
+#ifdef BLE_PIN_CODE
+  // 检查蓝牙连接后是否需要自动同步时间
+  if (serial_interface.checkAndRequestTimeSync()) {
+    Serial.println("[BLE] Time sync request sent");
+  }
+#endif
+
 #ifdef CUSTOM_BOARD
   unsigned long now = millis();
 
-  if (now - _last_activity >= SCREEN_TIMEOUT_MS && !_screen_off) {
+  if (now - _last_activity >= get_screen_timeout_ms() && get_screen_timeout_ms() > 0 && !_screen_off) {
     display.turnOff();
     _screen_off = true;
     Serial.println("[UI] Screen timeout -> off");
@@ -849,6 +905,18 @@ void loop() {
   // 按钮输入（与 cardputer 的键盘处理类似，但简化为 2 个按钮）
   int btn_g0 = user_btn.check();    // GPIO0: 动作键（Enter/Advert/Scroll）
   int btn_g45 = user_btn2.check();  // GPIO45: 切页键（Next）——注意长按交给硬件关机
+
+  // 屏幕关闭时，任何按键唤醒屏幕
+  if (_screen_off && (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE)) {
+    display.turnOn();
+    _screen_off = false;
+    _last_activity = now;
+    _just_woken = true;
+    Serial.println("[UI] Screen wake up");
+    draw_status_screen();
+    next_refresh = now + 60000;
+    return;
+  }
 
   // 有按键交互时重置休眠计时器
   if (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE) {
@@ -864,6 +932,13 @@ void loop() {
   if (btn_g45 == BUTTON_EVENT_CLICK) {
     board.beep(150, 1500);
     Serial.println("[UI] G45: Next");
+
+    // 处理超时选择模式
+    if (_in_timeout_select) {
+        _timeout_selected_idx = (_timeout_selected_idx + 1) % _timeout_options_count;
+        draw_status_screen();
+        return;
+    }
 
     if (_menu_state == MenuScreen::SETTINGS && !_settings_selected) {
         // 设置主菜单：向下滚动选中项
@@ -915,6 +990,15 @@ void loop() {
     board.beep(200, 1000);
     user_btn.cancelClick();  // 阻止松开时触发 CLICK
 
+    // 处理超时选择模式：取消选择，返回 Other 设置页
+    if (_in_timeout_select) {
+        _in_timeout_select = false;
+        Serial.println("[UI] G0 long: Cancel timeout selection");
+        draw_status_screen();
+        next_refresh = now + 60000;
+        return;
+    }
+
     if (_menu_state == MenuScreen::SETTINGS && _settings_selected) {
         // 设置子分类：返回设置主菜单
         _settings_selected = false;
@@ -947,6 +1031,19 @@ void loop() {
   if (btn_g0 == BUTTON_EVENT_CLICK) {
     board.beep(100, 2000);
 
+    // 处理超时选择模式：确认选择并返回 Theme 设置页
+    if (_in_timeout_select) {
+        _in_timeout_select = false;
+        // 保存到持久化存储
+        NodePrefs* prefs = the_mesh.getNodePrefs();
+        prefs->screen_timeout_seconds = _timeout_options[_timeout_selected_idx];
+        the_mesh.savePrefs();
+        Serial.printf("[UI] G0: Timeout set to %s (%ds)\n", _timeout_labels[_timeout_selected_idx], _timeout_options[_timeout_selected_idx]);
+        draw_status_screen();
+        next_refresh = now + 60000;
+        return;
+    }
+
     if (_menu_state == MenuScreen::SETTINGS) {
         if (!_settings_selected) {
             // 进入选中的子分类
@@ -961,7 +1058,14 @@ void loop() {
             }
             Serial.println("[UI] G0: Enter settings category");
         } else {
-            // 在子分类中：返回主菜单
+            // 在子分类中：如果是 Theme 页面，进入超时选择模式
+            if (_settings_category == SettingsCategory::THEME) {
+                _in_timeout_select = true;
+                Serial.println("[UI] G0: Enter timeout selection");
+                draw_status_screen();
+                next_refresh = now + 60000;
+                return;
+            }
             _settings_selected = false;
             Serial.println("[UI] G0: Back to main settings");
         }

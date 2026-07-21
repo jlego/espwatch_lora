@@ -17,6 +17,7 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   uint32_t _pin_code;
   unsigned long _last_write;
   unsigned long adv_restart_time;
+  bool _time_sync_pending;  // 蓝牙连接后需要同步时间
 
   struct Frame {
     uint8_t len;
@@ -60,6 +61,7 @@ public:
     _last_write = 0;
     last_conn_id = 0;
     send_queue_len = recv_queue_len = 0;
+    _time_sync_pending = false;
   }
 
   void begin(const char* device_name, uint32_t pin_code);
@@ -74,6 +76,12 @@ public:
   bool isWriteBusy() const override;
   size_t writeFrame(const uint8_t src[], size_t len) override;
   size_t checkRecvFrame(uint8_t dest[]) override;
+
+  // 检查并处理蓝牙连接后的时间同步（发送时间同步请求）
+  bool checkAndRequestTimeSync();
+  
+  // 获取时间同步待处理标志
+  bool isTimeSyncPending() const { return _time_sync_pending; }
 };
 
 #if BLE_DEBUG_LOGGING && ARDUINO
