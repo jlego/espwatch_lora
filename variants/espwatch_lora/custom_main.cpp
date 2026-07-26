@@ -2,36 +2,36 @@
 #include <Mesh.h>
 #include "MyMesh.h"
 #include "target.h"
+#include "lcd.h"
+#include <lvgl.h>
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
 
 static unsigned long next_refresh = 0;
-static volatile bool _new_message = false;  // 收到新消息标志
+static volatile bool _new_message = false;
 
-// 屏幕休眠状态（CUSTOM_BOARD）
+// 屏幕休眠状态
 static unsigned long _last_activity = 0;
 static bool _screen_off = false;
 static bool _just_woken = false;
-static volatile bool _g0_pressed = false;  // GPIO0 中断标志
-// 屏幕休眠超时选项（秒）
+static volatile bool _g0_pressed = false;
 static const uint16_t _timeout_options[] = {0, 10, 30, 60, 120, 300};
 static const int _timeout_options_count = sizeof(_timeout_options) / sizeof(_timeout_options[0]);
 static const char* _timeout_labels[] = {"Never", "10s", "30s", "1m", "2m", "5m"};
-static int _timeout_selected_idx = 1;  // 默认 10s，setup() 中会从 NodePrefs 加载
-static bool _in_timeout_select = false;  // 是否正在选择超时选项
+static int _timeout_selected_idx = 1;
+static bool _in_timeout_select = false;
 
 // 时间设置状态
-static bool _in_time_set = false;  // 是否正在设置时间
-static int _time_edit_field = 0;   // 0=小时, 1=分钟
-static bool _time_editing = false;  // 是否已进入编辑模式（选中时/分后）
+static bool _in_time_set = false;
+static int _time_edit_field = 0;
+static bool _time_editing = false;
 static int _time_edit_hour = 0;
 static int _time_edit_minute = 0;
 
-// 获取当前屏幕休眠超时毫秒值
 static unsigned long get_screen_timeout_ms() {
     uint16_t secs = _timeout_options[_timeout_selected_idx];
-    if (secs == 0) return 0;  // Never
+    if (secs == 0) return 0;
     return (unsigned long)secs * 1000UL;
 }
 
@@ -48,7 +48,6 @@ static unsigned long get_screen_timeout_ms() {
   ArduinoSerialInterface serial_interface;
 #endif
 
-// 简单的 UITask 实现，用于接收消息通知
 class SimpleUITask : public AbstractUITask {
 public:
     SimpleUITask() : AbstractUITask(nullptr, nullptr) {}
@@ -58,7 +57,7 @@ public:
         _new_message = true;
     }
     void onDiscoveredContact(ContactInfo& ci, bool is_new, uint8_t path_len, const uint8_t* path) {
-        _new_message = true;  // 收到 advert 后也刷新页面
+        _new_message = true;
     }
     void notify(UIEventType t = UIEventType::none) override {}
     void loop() override {}
@@ -79,20 +78,635 @@ void halt() {
   }
 }
 
+// LVGL 对象指针
+static lv_obj_t *scr_main = nullptr;
+static lv_obj_t *tabview = nullptr;
+static lv_obj_t *tab_home = nullptr;
+static lv_obj_t *tab_contacts = nullptr;
+static lv_obj_t *tab_channels = nullptr;
+static lv_obj_t *tab_settings = nullptr;
+
+// Home 页对象
+static lv_obj_t *lbl_time = nullptr;
+static lv_obj_t *lbl_date = nullptr;
+static lv_obj_t *lbl_batt = nullptr;
+
+// Contacts 页对象
+static lv_obj_t *lst_contacts = nullptr;
+static lv_obj_t *lbl_contact_count = nullptr;
+
+// Channels 页对象
+static lv_obj_t *lst_channels = nullptr;
+
+// Settings 页对象
+static lv_obj_t *lst_settings = nullptr;
+static lv_obj_t *lbl_settings_detail = nullptr;
+
+// 状态变量
+enum class MenuScreen {
+    HOME, CONTACTS, CHANNELS, CHAT, SETTINGS
+};
+
+enum class SettingsCategory {
+    MAIN_MENU, PUBLIC_INFO, RADIO_SETUP, THEME, OTHER, DEVICE_INFO
+};
+
+static MenuScreen _menu_state = MenuScreen::HOME;
+static MenuScreen _chat_parent = MenuScreen::CONTACTS;
+static SettingsCategory _settings_category = SettingsCategory::MAIN_MENU;
+static int _settings_menu_idx = 0;
+static int _contacts_selected = 0;
+static int _channels_selected = 0;
+static bool _settings_selected = false;
+
+// LVGL 显示刷新回调
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+    int32_t w = (area->x2 - area->x1 + 1);
+    int32_t h = (area->y2 - area->y1 + 1);
+    
+    LCD_SetWindows(area->x1, area->y1, area->x2, area->y2);
+    
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            Lcd_WriteData_16Bit(color_p->full);
+            color_p++;
+        }
+    }
+    
+    lv_disp_flush_ready(disp);
+}
+
+// 自定义按键编码
+#define MY_KEY_ENTER  1
+#define MY_KEY_NEXT   2
+
+// LVGL 输入设备回调
+void my_input_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
+    static bool last_state = false;
+    static uint32_t last_key = 0;
+    
+    if (digitalRead(PIN_USER_BTN) == LOW) {
+        data->state = LV_INDEV_STATE_PR;
+        data->key = MY_KEY_ENTER;
+        last_key = MY_KEY_ENTER;
+        last_state = true;
+    } else if (digitalRead(PIN_BTN_2) == LOW) {
+        data->state = LV_INDEV_STATE_PR;
+        data->key = MY_KEY_NEXT;
+        last_key = MY_KEY_NEXT;
+        last_state = true;
+    } else {
+        data->state = LV_INDEV_STATE_REL;
+        data->key = last_key;
+        last_state = false;
+    }
+}
+
+// LVGL 缓冲区
+#define LVGL_BUF_SIZE (240 * 20)
+static lv_color_t lvgl_buf1[LVGL_BUF_SIZE];
+static lv_color_t lvgl_buf2[LVGL_BUF_SIZE];
+static lv_disp_draw_buf_t draw_buf;
+static lv_disp_drv_t disp_drv;
+static lv_indev_drv_t indev_drv;
+
+void init_lvgl() {
+    lv_init();
+    
+    lv_disp_draw_buf_init(&draw_buf, lvgl_buf1, lvgl_buf2, LVGL_BUF_SIZE);
+    
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = 240;
+    disp_drv.ver_res = 285;
+    disp_drv.flush_cb = my_disp_flush;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+    
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_KEYPAD;
+    indev_drv.read_cb = my_input_read;
+    lv_indev_drv_register(&indev_drv);
+}
+
+// 更新时间显示
+void update_time_display(lv_timer_t *timer) {
+    uint32_t now_secs = rtc_clock.getCurrentTime();
+    int h = (now_secs / 3600) % 24;
+    int m = (now_secs % 3600) / 60;
+    
+    char time_buf[16];
+    snprintf(time_buf, sizeof(time_buf), "%02d:%02d", h, m);
+    lv_label_set_text(lbl_time, time_buf);
+    
+    // 计算日期
+    int days = now_secs / 86400;
+    int y = 1970, mon = 1, d = 1;
+    int remaining_days = days;
+    while (1) {
+        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+        int ydays = leap ? 366 : 365;
+        if (remaining_days < ydays) break;
+        remaining_days -= ydays;
+        y++;
+    }
+    bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    const int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int feb = leap ? 29 : 28;
+    for (mon = 0; mon < 12; mon++) {
+        int md = (mon == 1) ? feb : mdays[mon];
+        if (remaining_days < md) break;
+        remaining_days -= md;
+    }
+    mon++;
+    d = remaining_days + 1;
+    
+    char date_buf[16];
+    snprintf(date_buf, sizeof(date_buf), "%04d-%d-%d", y, mon, d);
+    lv_label_set_text(lbl_date, date_buf);
+    
+    // 更新电量
+    uint8_t batt = board.getBattPercent();
+    char batt_buf[16];
+    snprintf(batt_buf, sizeof(batt_buf), "Battery: %d%%", batt);
+    lv_label_set_text(lbl_batt, batt_buf);
+}
+
+// 前向声明按钮回调函数
+void contact_btn_event_cb(lv_event_t *e);
+void channel_btn_event_cb(lv_event_t *e);
+void settings_btn_event_cb(lv_event_t *e);
+
+// 更新联系人列表
+void update_contacts_list() {
+    lv_obj_clean(lst_contacts);
+    
+    int num_contacts = the_mesh.getNumContacts();
+    
+    char count_buf[64];
+    snprintf(count_buf, sizeof(count_buf), "%d nodes", num_contacts);
+    lv_label_set_text(lbl_contact_count, count_buf);
+    
+    for (int i = 0; i < num_contacts; i++) {
+        ContactInfo contact;
+        if (the_mesh.getContactByIdx(i, contact)) {
+            lv_obj_t *btn = lv_btn_create(lst_contacts);
+            lv_obj_set_width(btn, lv_pct(100));
+            lv_obj_set_style_bg_color(btn, (i == _contacts_selected) ? lv_color_hex(0x0096d8) : lv_color_hex(0x333333), 0);
+            
+            lv_obj_t *label = lv_label_create(btn);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%s (%dhops)", contact.name, contact.out_path_len);
+            lv_label_set_text(label, buf);
+            lv_obj_center(label);
+            
+            lv_obj_set_user_data(btn, (void*)(intptr_t)i);
+            lv_obj_add_event_cb(btn, contact_btn_event_cb, LV_EVENT_CLICKED, NULL);
+            lv_obj_add_event_cb(btn, contact_btn_event_cb, LV_EVENT_KEY, NULL);
+        }
+    }
+}
+
+// 更新频道列表
+void update_channels_list() {
+    lv_obj_clean(lst_channels);
+    
+    const char* channels[] = {"Broadcast", "Contacts", "Direct"};
+    int num_channels = 3;
+    
+    for (int i = 0; i < num_channels; i++) {
+        lv_obj_t *btn = lv_btn_create(lst_channels);
+        lv_obj_set_width(btn, lv_pct(100));
+        lv_obj_set_style_bg_color(btn, (i == _channels_selected) ? lv_color_hex(0x0096d8) : lv_color_hex(0x333333), 0);
+        
+        lv_obj_t *label = lv_label_create(btn);
+        lv_label_set_text(label, channels[i]);
+        lv_obj_center(label);
+        
+        lv_obj_set_user_data(btn, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(btn, channel_btn_event_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(btn, channel_btn_event_cb, LV_EVENT_KEY, NULL);
+    }
+}
+
+// 更新设置列表
+void update_settings_list() {
+    lv_obj_clean(lst_settings);
+    
+    if (!_settings_selected) {
+        const char* categories[] = {"Public Info", "Radio Setup", "Theme", "Other", "Device Info"};
+        int num_cats = 5;
+        
+        for (int i = 0; i < num_cats; i++) {
+            lv_obj_t *btn = lv_btn_create(lst_settings);
+            lv_obj_set_width(btn, lv_pct(100));
+            lv_obj_set_style_bg_color(btn, (i == _settings_menu_idx) ? lv_color_hex(0x0096d8) : lv_color_hex(0x333333), 0);
+            
+            lv_obj_t *label = lv_label_create(btn);
+            lv_label_set_text(label, categories[i]);
+            lv_obj_center(label);
+            
+            lv_obj_set_user_data(btn, (void*)(intptr_t)i);
+            lv_obj_add_event_cb(btn, settings_btn_event_cb, LV_EVENT_CLICKED, NULL);
+            lv_obj_add_event_cb(btn, settings_btn_event_cb, LV_EVENT_KEY, NULL);
+        }
+    } else {
+        switch (_settings_category) {
+            case SettingsCategory::PUBLIC_INFO: {
+                lv_obj_t *label = lv_label_create(lst_settings);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Name: %s\nBLE PIN: %06lu", 
+                         the_mesh.getNodeName(), (unsigned long)the_mesh.getBLEPin());
+                lv_label_set_text(label, buf);
+                break;
+            }
+            case SettingsCategory::RADIO_SETUP: {
+                lv_obj_t *label = lv_label_create(lst_settings);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Frequency: %.1f MHz\nSF: %d\nBW: %.1f kHz\nTX Power: %d dBm",
+                         LORA_FREQ, LORA_SF, LORA_BW, LORA_TX_POWER);
+                lv_label_set_text(label, buf);
+                break;
+            }
+            case SettingsCategory::THEME: {
+                lv_obj_t *label = lv_label_create(lst_settings);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Screen Timeout: %s", _timeout_labels[_timeout_selected_idx]);
+                lv_label_set_text(label, buf);
+                break;
+            }
+            case SettingsCategory::OTHER: {
+                lv_obj_t *label = lv_label_create(lst_settings);
+                uint32_t now_secs = rtc_clock.getCurrentTime();
+                int h = (now_secs / 3600) % 24;
+                int m = (now_secs % 3600) / 60;
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Time: %02d:%02d\nFactory Reset: Hold to reset", h, m);
+                lv_label_set_text(label, buf);
+                break;
+            }
+            case SettingsCategory::DEVICE_INFO: {
+                lv_obj_t *label = lv_label_create(lst_settings);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "Node: %s\nRadio: SX1268 %.1f MHz\nUptime: %ldmin",
+                         the_mesh.getNodeName(), LORA_FREQ, rtc_clock.getCurrentTime() / 60);
+                lv_label_set_text(label, buf);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+// Chat 页面管理
+static bool _chat_visible = false;
+static lv_obj_t *chat_overlay = nullptr;
+static lv_obj_t *lbl_chat_title_overlay = nullptr;
+static lv_obj_t *lst_chat_overlay = nullptr;
+
+void show_chat_overlay(const char* title) {
+    if (chat_overlay == nullptr) {
+        chat_overlay = lv_obj_create(lv_scr_act());
+        lv_obj_set_size(chat_overlay, lv_pct(100), lv_pct(100));
+        lv_obj_set_style_border_width(chat_overlay, 0, 0);
+        lv_obj_set_style_outline_width(chat_overlay, 0, 0);
+        lv_obj_set_style_pad_all(chat_overlay, 0, 0);
+        lv_obj_set_style_bg_color(chat_overlay, lv_color_hex(0x000000), 0);
+        lv_obj_set_flex_flow(chat_overlay, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_scrollbar_mode(chat_overlay, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_width(chat_overlay, 0, LV_PART_SCROLLBAR);
+        lv_obj_set_style_bg_opa(chat_overlay, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+        
+        lbl_chat_title_overlay = lv_label_create(chat_overlay);
+        lv_obj_set_style_text_font(lbl_chat_title_overlay, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl_chat_title_overlay, lv_color_hex(0xFFFFFF), 0);
+        
+        lst_chat_overlay = lv_list_create(chat_overlay);
+        lv_obj_set_size(lst_chat_overlay, lv_pct(100), lv_pct(90));
+        lv_obj_set_scrollbar_mode(lst_chat_overlay, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_width(lst_chat_overlay, 0, LV_PART_SCROLLBAR);
+        lv_obj_set_style_bg_opa(lst_chat_overlay, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    }
+    
+    lv_label_set_text(lbl_chat_title_overlay, title);
+    lv_obj_clean(lst_chat_overlay);
+    
+    lv_obj_clear_flag(chat_overlay, LV_OBJ_FLAG_HIDDEN);
+    _chat_visible = true;
+}
+
+void hide_chat_overlay() {
+    if (chat_overlay != nullptr) {
+        lv_obj_add_flag(chat_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    _chat_visible = false;
+}
+
+// 按钮事件回调 - 处理CLICKED和KEY事件
+// KEY事件中：MY_KEY_ENTER触发点击，MY_KEY_NEXT切换选中项
+void contact_btn_event_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+    
+    if (code == LV_EVENT_CLICKED) {
+        _contacts_selected = idx;
+        update_contacts_list();
+        _chat_parent = MenuScreen::CONTACTS;
+        _menu_state = MenuScreen::CHAT;
+        show_chat_overlay("Contact Chat");
+    } else if (code == LV_EVENT_KEY) {
+        uint32_t key = lv_indev_get_key(lv_indev_get_act());
+        if (key == MY_KEY_ENTER) {
+            _contacts_selected = idx;
+            update_contacts_list();
+            _chat_parent = MenuScreen::CONTACTS;
+            _menu_state = MenuScreen::CHAT;
+            show_chat_overlay("Contact Chat");
+        } else if (key == MY_KEY_NEXT) {
+            _contacts_selected = idx;
+            update_contacts_list();
+        }
+    }
+}
+
+void channel_btn_event_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+    
+    if (code == LV_EVENT_CLICKED) {
+        _channels_selected = idx;
+        update_channels_list();
+        _chat_parent = MenuScreen::CHANNELS;
+        _menu_state = MenuScreen::CHAT;
+        show_chat_overlay("Channel Chat");
+    } else if (code == LV_EVENT_KEY) {
+        uint32_t key = lv_indev_get_key(lv_indev_get_act());
+        if (key == MY_KEY_ENTER) {
+            _channels_selected = idx;
+            update_channels_list();
+            _chat_parent = MenuScreen::CHANNELS;
+            _menu_state = MenuScreen::CHAT;
+            show_chat_overlay("Channel Chat");
+        } else if (key == MY_KEY_NEXT) {
+            _channels_selected = idx;
+            update_channels_list();
+        }
+    }
+}
+
+void settings_btn_event_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+    
+    if (code == LV_EVENT_CLICKED) {
+        if (!_settings_selected) {
+            _settings_menu_idx = idx;
+            update_settings_list();
+            _settings_selected = true;
+            switch (idx) {
+                case 0: _settings_category = SettingsCategory::PUBLIC_INFO; break;
+                case 1: _settings_category = SettingsCategory::RADIO_SETUP; break;
+                case 2: _settings_category = SettingsCategory::THEME; break;
+                case 3: _settings_category = SettingsCategory::OTHER; break;
+                case 4: _settings_category = SettingsCategory::DEVICE_INFO; break;
+            }
+            update_settings_list();
+        } else {
+            _settings_selected = false;
+            _settings_menu_idx = 0;
+            update_settings_list();
+        }
+    } else if (code == LV_EVENT_KEY) {
+        uint32_t key = lv_indev_get_key(lv_indev_get_act());
+        if (key == MY_KEY_ENTER) {
+            if (!_settings_selected) {
+                _settings_menu_idx = idx;
+                update_settings_list();
+                _settings_selected = true;
+                switch (idx) {
+                    case 0: _settings_category = SettingsCategory::PUBLIC_INFO; break;
+                    case 1: _settings_category = SettingsCategory::RADIO_SETUP; break;
+                    case 2: _settings_category = SettingsCategory::THEME; break;
+                    case 3: _settings_category = SettingsCategory::OTHER; break;
+                    case 4: _settings_category = SettingsCategory::DEVICE_INFO; break;
+                }
+                update_settings_list();
+            } else {
+                _settings_selected = false;
+                _settings_menu_idx = 0;
+                update_settings_list();
+            }
+        } else if (key == MY_KEY_NEXT) {
+            _settings_menu_idx = idx;
+            update_settings_list();
+        }
+    }
+}
+
+// 创建UI
+void create_ui() {
+    // 设置黑底白字全局样式
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(lv_scr_act(), lv_color_hex(0xFFFFFF), 0);
+    
+    // 创建Tab视图（隐藏底部导航栏）
+    tabview = lv_tabview_create(lv_scr_act(), LV_DIR_BOTTOM, 0);
+    
+    // 去掉tabview边框
+    lv_obj_set_style_border_width(tabview, 0, 0);
+    lv_obj_set_style_outline_width(tabview, 0, 0);
+    lv_obj_set_style_pad_all(tabview, 0, 0);
+    lv_obj_set_style_bg_color(tabview, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(tabview, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(tabview, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tabview, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tabview, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    // 创建标签页（只保留4个一级页面）
+    tab_home = lv_tabview_add_tab(tabview, "Home");
+    tab_contacts = lv_tabview_add_tab(tabview, "Contacts");
+    tab_channels = lv_tabview_add_tab(tabview, "Channels");
+    tab_settings = lv_tabview_add_tab(tabview, "Settings");
+    
+    // 隐藏tabview内容区域的滚动条
+    lv_obj_t *tv_content = lv_tabview_get_content(tabview);
+    lv_obj_set_scrollbar_mode(tv_content, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tv_content, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tv_content, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    // 去掉所有tab页面的边框，设置黑底白字
+    lv_obj_set_style_border_width(tab_home, 0, 0);
+    lv_obj_set_style_outline_width(tab_home, 0, 0);
+    lv_obj_set_style_pad_all(tab_home, 0, 0);
+    lv_obj_set_style_bg_color(tab_home, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(tab_home, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(tab_home, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tab_home, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tab_home, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    lv_obj_set_style_border_width(tab_contacts, 0, 0);
+    lv_obj_set_style_outline_width(tab_contacts, 0, 0);
+    lv_obj_set_style_pad_all(tab_contacts, 0, 0);
+    lv_obj_set_style_bg_color(tab_contacts, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(tab_contacts, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(tab_contacts, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tab_contacts, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tab_contacts, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    lv_obj_set_style_border_width(tab_channels, 0, 0);
+    lv_obj_set_style_outline_width(tab_channels, 0, 0);
+    lv_obj_set_style_pad_all(tab_channels, 0, 0);
+    lv_obj_set_style_bg_color(tab_channels, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(tab_channels, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(tab_channels, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tab_channels, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tab_channels, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    lv_obj_set_style_border_width(tab_settings, 0, 0);
+    lv_obj_set_style_outline_width(tab_settings, 0, 0);
+    lv_obj_set_style_pad_all(tab_settings, 0, 0);
+    lv_obj_set_style_bg_color(tab_settings, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(tab_settings, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(tab_settings, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(tab_settings, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(tab_settings, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    
+    // Home 页
+    lv_obj_set_flex_flow(tab_home, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tab_home, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    
+    lbl_time = lv_label_create(tab_home);
+    lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_48, 0);
+    lv_label_set_text(lbl_time, "00:00");
+    
+    lbl_date = lv_label_create(tab_home);
+    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_16, 0);
+    lv_label_set_text(lbl_date, "2024-01-01");
+    
+    lbl_batt = lv_label_create(tab_home);
+    lv_obj_set_style_text_font(lbl_batt, &lv_font_montserrat_14, 0);
+    lv_label_set_text(lbl_batt, "Battery: 100%");
+    
+    // Contacts 页
+    lv_obj_set_flex_flow(tab_contacts, LV_FLEX_FLOW_COLUMN);
+    
+    lv_obj_t *hdr_contacts = lv_label_create(tab_contacts);
+    lv_label_set_text(hdr_contacts, "Contacts");
+    lv_obj_set_style_text_font(hdr_contacts, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(hdr_contacts, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(hdr_contacts, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_opa(hdr_contacts, LV_OPA_COVER, 0);
+    lv_obj_set_width(hdr_contacts, lv_pct(100));
+    lv_obj_set_style_pad_top(hdr_contacts, 5, 0);
+    lv_obj_set_style_pad_bottom(hdr_contacts, 5, 0);
+    lv_obj_set_style_text_align(hdr_contacts, LV_TEXT_ALIGN_CENTER, 0);
+    
+    lbl_contact_count = lv_label_create(tab_contacts);
+    lv_label_set_text(lbl_contact_count, "0 nodes");
+    
+    lst_contacts = lv_list_create(tab_contacts);
+    lv_obj_set_size(lst_contacts, lv_pct(100), lv_pct(80));
+    lv_obj_set_style_border_width(lst_contacts, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(lst_contacts, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_outline_width(lst_contacts, 0, 0);
+    lv_obj_set_style_bg_color(lst_contacts, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(lst_contacts, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(lst_contacts, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(lst_contacts, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(lst_contacts, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_row(lst_contacts, 5, 0);
+    
+    // Channels 页
+    lv_obj_set_flex_flow(tab_channels, LV_FLEX_FLOW_COLUMN);
+    
+    lv_obj_t *hdr_channels = lv_label_create(tab_channels);
+    lv_label_set_text(hdr_channels, "Channels");
+    lv_obj_set_style_text_font(hdr_channels, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(hdr_channels, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(hdr_channels, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_opa(hdr_channels, LV_OPA_COVER, 0);
+    lv_obj_set_width(hdr_channels, lv_pct(100));
+    lv_obj_set_style_pad_top(hdr_channels, 5, 0);
+    lv_obj_set_style_pad_bottom(hdr_channels, 5, 0);
+    lv_obj_set_style_text_align(hdr_channels, LV_TEXT_ALIGN_CENTER, 0);
+    
+    lst_channels = lv_list_create(tab_channels);
+    lv_obj_set_size(lst_channels, lv_pct(100), lv_pct(90));
+    lv_obj_set_style_border_width(lst_channels, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(lst_channels, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_outline_width(lst_channels, 0, 0);
+    lv_obj_set_style_bg_color(lst_channels, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(lst_channels, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(lst_channels, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(lst_channels, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(lst_channels, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_row(lst_channels, 5, 0);
+    
+    // Settings 页
+    lv_obj_set_flex_flow(tab_settings, LV_FLEX_FLOW_COLUMN);
+    
+    lv_obj_t *hdr_settings = lv_label_create(tab_settings);
+    lv_label_set_text(hdr_settings, "Settings");
+    lv_obj_set_style_text_font(hdr_settings, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(hdr_settings, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(hdr_settings, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_opa(hdr_settings, LV_OPA_COVER, 0);
+    lv_obj_set_width(hdr_settings, lv_pct(100));
+    lv_obj_set_style_pad_top(hdr_settings, 5, 0);
+    lv_obj_set_style_pad_bottom(hdr_settings, 5, 0);
+    lv_obj_set_style_text_align(hdr_settings, LV_TEXT_ALIGN_CENTER, 0);
+    
+    lst_settings = lv_list_create(tab_settings);
+    lv_obj_set_size(lst_settings, lv_pct(100), lv_pct(90));
+    lv_obj_set_style_border_width(lst_settings, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(lst_settings, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_outline_width(lst_settings, 0, 0);
+    lv_obj_set_style_bg_color(lst_settings, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(lst_settings, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_scrollbar_mode(lst_settings, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_width(lst_settings, 0, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(lst_settings, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_row(lst_settings, 5, 0);
+    
+    // 更新列表
+    update_contacts_list();
+    update_channels_list();
+    update_settings_list();
+    
+    // 创建定时器更新时间
+    lv_timer_create(update_time_display, 1000, NULL);
+}
+
 void draw_startup_screen() {
 #ifdef DISPLAY_CLASS
   if (!display.begin()) return;
-
-  display.startFrame(DisplayDriver::DARK);
-  display.setColor(DisplayDriver::GREEN);
-  display.setTextSize(2);
-  display.drawTextCentered(120, 30, "MeshCore");
-  display.setTextSize(1);
-  display.setColor(DisplayDriver::YELLOW);
-  display.drawTextCentered(120, 70, "ESPWatch LoRa");
-  display.setColor(DisplayDriver::LIGHT);
-  display.drawTextCentered(120, 100, "Initializing...");
-  display.endFrame();
+  
+  init_lvgl();
+  
+  lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+  
+  lv_obj_t *lbl1 = lv_label_create(lv_scr_act());
+  lv_obj_set_style_text_font(lbl1, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(lbl1, lv_color_hex(0x00FF00), 0);
+  lv_label_set_text(lbl1, "MeshCore");
+  lv_obj_align(lbl1, LV_ALIGN_CENTER, 0, -40);
+  
+  lv_obj_t *lbl2 = lv_label_create(lv_scr_act());
+  lv_obj_set_style_text_font(lbl2, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(lbl2, lv_color_hex(0xFFFF00), 0);
+  lv_label_set_text(lbl2, "ESPWatch LoRa");
+  lv_obj_align(lbl2, LV_ALIGN_CENTER, 0, 0);
+  
+  lv_obj_t *lbl3 = lv_label_create(lv_scr_act());
+  lv_obj_set_style_text_font(lbl3, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(lbl3, lv_color_hex(0xFFFFFF), 0);
+  lv_label_set_text(lbl3, "Initializing...");
+  lv_obj_align(lbl3, LV_ALIGN_CENTER, 0, 40);
+  
+  lv_refr_now(NULL);
 #endif
 }
 
@@ -105,9 +719,8 @@ void setup() {
   draw_startup_screen();
   user_btn.begin();
   user_btn2.begin();
-  _last_activity = millis();  // 初始化屏幕休眠计时器
+  _last_activity = millis();
 
-  // 打印 CW2015 电池信息
   uint16_t batt_mv = board.getBattMilliVolts();
   uint8_t batt_pct = board.getBattPercent();
   uint8_t cw2015_soc = board.getCW2015SoC();
@@ -129,13 +742,6 @@ void setup() {
 #endif
   store.begin();
 
-  // 删除旧的身份文件，确保每次烧录后设备生成新的唯一密钥对
-  // 这样多台设备烧录同一固件时，每台设备都会有独立的公钥/私钥
-//   if (SPIFFS.exists("/identity/_main.id")) {
-//     SPIFFS.remove("/identity/_main.id");
-//     Serial.println("[INFO] Removed old identity file, will generate new keypair");
-//   }
-
   the_mesh.begin(
 #ifdef DISPLAY_CLASS
       true
@@ -151,7 +757,6 @@ void setup() {
 #endif
   the_mesh.startInterface(serial_interface);
 
-  // 从持久化设置加载屏幕休眠超时
   NodePrefs* prefs = the_mesh.getNodePrefs();
   uint16_t saved_timeout = prefs->screen_timeout_seconds;
   for (int i = 0; i < _timeout_options_count; i++) {
@@ -161,1026 +766,44 @@ void setup() {
     }
   }
 
+  // 创建主UI
+  create_ui();
+
   Serial.println("Boot complete");
 }
 
-// ===================== 主界面：cardputer 风格 =====================
-
-#ifdef CUSTOM_BOARD
-
-// ========= 状态变量（模仿 cardputer 的 MenuScreen + SettingsCategory） =========
-enum class MenuScreen {
-    HOME,
-    CONTACTS,
-    CHANNELS,
-    CHAT,
-    SETTINGS
-};
-
-enum class SettingsCategory {
-    MAIN_MENU,
-    PUBLIC_INFO,
-    RADIO_SETUP,
-    THEME,
-    OTHER,
-    DEVICE_INFO
-};
-
-static MenuScreen _menu_state = MenuScreen::HOME;
-static MenuScreen _chat_parent = MenuScreen::CONTACTS;  // chat 页的来源（用于返回）
-static SettingsCategory _settings_category = SettingsCategory::MAIN_MENU;
-static int _settings_menu_idx = 0;       // 设置项索引（滚动位置）
-static int _contacts_scroll = 0;          // 联系人滚动（窗口起点）
-static int _contacts_selected = 0;        // 选中的联系人索引
-static int _channels_scroll = 0;          // 频道滚动（窗口起点）
-static int _channels_selected = 0;        // 选中的频道索引
-static int _chat_scroll = 0;              // 聊天消息滚动
-static bool _settings_selected = false;   // 设置中：是否在子分类里
-
-// ========= 通用 UI 组件 =========
-void draw_header(const char* title) {
-    char buf[16];
-
-    // 顶部标题栏 (0, 0, 240, 28)
-    display.setColor(DisplayDriver::BLUE);
-    display.fillRect(0, 0, 240, 28);
-    display.setColor(DisplayDriver::LIGHT);
-    display.setTextSize(2);
-
-    // 左上角：当前时分
-    uint32_t now_sec = rtc_clock.getCurrentTime();
-    int hours = (now_sec / 3600) % 24;
-    int mins = (now_sec % 3600) / 60;
-    snprintf(buf, sizeof(buf), "%02d:%02d", hours, mins);
-    display.setTextSize(1);
-    display.setCursor(15, 11);
-    display.print(buf);
-
-    // 标题居中
-    display.setTextSize(2);
-    int title_len = strlen(title);
-    int title_x = 120 - (title_len * 6);
-    if (title_x < 25) title_x = 25;
-    display.setCursor(title_x, 7);
-    display.print(title);
-
-    // 右上角：电量数值 + 电池图标
-    uint8_t batt = board.getBattPercent();
-
-    // 电量数值（图标左边）
-    snprintf(buf, sizeof(buf), "%d", batt);
-    display.setTextSize(1);
-    int text_w = strlen(buf) * 6;
-    display.setCursor(198 - text_w, 11);
-    display.print(buf);
-
-    // 电池图标
-    int bat_x = 200;
-    int bat_y = 9;
-    int bat_w = 22;
-    int bat_h = 10;
-
-    // 电池外框
-    display.setColor(DisplayDriver::GREEN);
-    display.drawRect(bat_x, bat_y, bat_w, bat_h);
-    // 电池正极（右侧小凸起）
-    display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
-
-    // 电池内部填充（根据电量）
-    int fill_w = (bat_w - 2) * batt / 100;
-    if (fill_w > 0) {
-        display.fillRect(bat_x + 1, bat_y + 1, fill_w, bat_h - 2);
-    }
-
-    // 低电量警告（红色）
-    if (batt <= 20) {
-        display.setColor(DisplayDriver::RED);
-        display.drawRect(bat_x, bat_y, bat_w, bat_h);
-        display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
-    }
-
-    // 恢复默认颜色，避免影响后续渲染
-    display.setColor(DisplayDriver::LIGHT);
-}
-
-void draw_tab_bar() {
-    // Home 页：不显示 tab bar
-    if (_menu_state == MenuScreen::HOME) {
-        return;
-    }
-    // Chat 页：不显示 tab bar，显示返回提示
-    if (_menu_state == MenuScreen::CHAT) {
-        // int bar_y = 258;
-        // display.setColor(DisplayDriver::LIGHT);
-        // display.drawRect(0, bar_y, 240, 27);
-        // display.setTextSize(2);
-        // display.setColor(DisplayDriver::YELLOW);
-        // display.setCursor(40, bar_y + 7);
-        // display.print("G0:Back  G45:Scroll");
-        return;
-    }
-
-    // 底部 tab bar (0, 258, 240, 27) - 4个tab
-    int bar_y = 258;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(0, bar_y, 240, 27);
-
-    display.setTextSize(1);
-
-    // 4个tab，每个60像素宽
-    const int TAB_W = 60;
-    const char* tab_names[] = {"Home", "Contacts", "Channels", "Settings"};
-    MenuScreen tab_states[] = {MenuScreen::HOME, MenuScreen::CONTACTS, MenuScreen::CHANNELS, MenuScreen::SETTINGS};
-
-    for (int i = 0; i < 4; i++) {
-        int tab_x = i * TAB_W;
-        if (_menu_state == tab_states[i]) {
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(tab_x, bar_y, TAB_W, 27);
-            display.setColor(DisplayDriver::DARK);
-        } else {
-            display.setColor(DisplayDriver::LIGHT);
-        }
-        // 居中文字
-        int text_len = strlen(tab_names[i]);
-        int cursor_x = tab_x + (TAB_W - text_len * 6) / 2;
-        display.setCursor(cursor_x, bar_y + 9);
-        display.print(tab_names[i]);
-    }
-}
-
-void draw_settings_bottom_menu(bool in_sub) {
-    // 设置底部：Save / Back
-    int bar_y = 258;
-    display.setColor(DisplayDriver::LIGHT);
-    display.drawRect(0, bar_y, 240, 27);
-
-    display.setTextSize(2);
-
-    // 左：Back (120宽)
-    display.setColor(DisplayDriver::LIGHT);
-    display.setCursor(13, bar_y + 7);
-    display.print("Back");
-
-    // 右：Next hint
-    display.setColor(DisplayDriver::YELLOW);
-    display.setCursor(133, bar_y + 7);
-    display.print("Next");
-}
-
-// ========= PAGE 0: HOME（数字表盘） =========
-void render_home() {
-    char num_buf[16];
-    const int TIME_TEXT_SIZE = 7;
-    const int DATE_TEXT_SIZE = 2;
-    const int CHAR_W = 6;  // (5+1) * 1
-
-    // 获取当前时间
-    uint32_t now_secs = rtc_clock.getCurrentTime();
-    int h = (now_secs / 3600) % 24;
-    int m = (now_secs % 3600) / 60;
-
-    // 时间 "HH:MM" 居中
-    int time_str_w = 5 * CHAR_W * TIME_TEXT_SIZE;  // "00:00" = 5 chars
-    int time_x = (240 - time_str_w) / 2;
-    int time_y = 100;
-
-    display.setTextSize(TIME_TEXT_SIZE);
-    display.setColor(DisplayDriver::LIGHT);
-    display.setCursor(time_x, time_y);
-    snprintf(num_buf, sizeof(num_buf), "%02d", h);
-    display.print(num_buf);
-    display.print(":");
-    snprintf(num_buf, sizeof(num_buf), "%02d", m);
-    display.print(num_buf);
-
-    // 日期 "YYYY-MM-DD" 居中，在时间正下方
-    int date_str_len = 10;  // "YYYY-MM-DD"
-    int date_str_w = date_str_len * CHAR_W * DATE_TEXT_SIZE;
-    int date_x = (240 - date_str_w) / 2;
-    int date_y = time_y + CHAR_W * TIME_TEXT_SIZE + 30;
-
-    display.setTextSize(DATE_TEXT_SIZE);
-    display.setCursor(date_x, date_y);
-    // 计算日期（从 epoch 秒数）
-    int days = now_secs / 86400;
-    int y = 1970;
-    int mon = 1;
-    int d = 1;
-    // 简化计算：从 1970-01-01 开始累加天数
-    {
-        int remaining_days = days;
-        // 年份
-        while (1) {
-            bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-            int ydays = leap ? 366 : 365;
-            if (remaining_days < ydays) break;
-            remaining_days -= ydays;
-            y++;
-        }
-        // 月份
-        bool leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-        const int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-        int feb = leap ? 29 : 28;
-        for (mon = 0; mon < 12; mon++) {
-            int md = (mon == 1) ? feb : mdays[mon];
-            if (remaining_days < md) break;
-            remaining_days -= md;
-        }
-        mon++;  // 1-based
-        d = remaining_days + 1;
-    }
-    snprintf(num_buf, sizeof(num_buf), "%04d-%d-%d", y, mon, d);
-    display.print(num_buf);
-
-    // 右上角：电量数值 + 电池图标
-    uint8_t batt = board.getBattPercent();
-    char batt_buf[8];
-    snprintf(batt_buf, sizeof(batt_buf), "%d", batt);
-    display.setTextSize(1);
-    int text_w = strlen(batt_buf) * 6;
-    display.setColor(DisplayDriver::LIGHT);
-    display.setCursor(198 - text_w, 11);
-    display.print(batt_buf);
-
-    // 电池图标
-    int bat_x = 200;
-    int bat_y = 9;
-    int bat_w = 22;
-    int bat_h = 10;
-    display.setColor(DisplayDriver::GREEN);
-    display.drawRect(bat_x, bat_y, bat_w, bat_h);
-    display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
-    int fill_w = (bat_w - 2) * batt / 100;
-    if (fill_w > 0) {
-        display.fillRect(bat_x + 1, bat_y + 1, fill_w, bat_h - 2);
-    }
-    if (batt <= 20) {
-        display.setColor(DisplayDriver::RED);
-        display.drawRect(bat_x, bat_y, bat_w, bat_h);
-        display.fillRect(bat_x + bat_w, bat_y + 2, 2, bat_h - 4);
-    }
-    display.setColor(DisplayDriver::LIGHT);
-}
-
-// ========= PAGE 1: CONTACTS =========
-void render_contacts() {
-    char buf[64];
-    int num_contacts = the_mesh.getNumContacts();
-
-    // 标题栏
-    draw_header("Contacts");
-
-    // 列表区 (y: 30 ~ 256)，每一行高 28，可显示 7 行
-    const int MAX_VISIBLE = 7;
-    const int ITEM_H = 28;
-    int y_start = 32;
-
-    // 选中项边界检查
-    if (_contacts_selected >= num_contacts) _contacts_selected = max(0, num_contacts - 1);
-    if (_contacts_selected < 0) _contacts_selected = 0;
-
-    // 让选中项保持在可见区域内
-    if (_contacts_selected >= _contacts_scroll + MAX_VISIBLE)
-        _contacts_scroll = _contacts_selected - MAX_VISIBLE + 1;
-    if (_contacts_selected < _contacts_scroll)
-        _contacts_scroll = _contacts_selected;
-    if (_contacts_scroll < 0) _contacts_scroll = 0;
-
-    // 显示计数 + 选中提示
-    display.setColor(DisplayDriver::YELLOW);
-    display.setTextSize(1);
-    snprintf(buf, sizeof(buf), "%d nodes  [select:%d]", num_contacts, _contacts_selected + 1);
-    display.setCursor(4, y_start);
-    display.print(buf);
-
-    // 显示节点列表
-    for (int i = 0; i < MAX_VISIBLE; i++) {
-        int idx = _contacts_scroll + i;
-        if (idx >= num_contacts) break;
-
-        int y = y_start + 18 + i * ITEM_H;
-        ContactInfo contact;
-        if (!the_mesh.getContactByIdx(idx, contact)) continue;
-
-        bool is_selected = (idx == _contacts_selected);
-        if (is_selected) {
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(2, y + 2, 236, ITEM_H - 4);
-            display.setColor(DisplayDriver::DARK);
-        } else {
-            display.setColor(DisplayDriver::LIGHT);
-        }
-
-        display.setTextSize(1);
-
-        // 节点名
-        char filtered[32];
-        strncpy(filtered, contact.name, sizeof(filtered));
-        filtered[sizeof(filtered) - 1] = '\0';
-        display.setCursor(10, y + 7);
-        display.print(filtered);
-
-        // 路径跳数
-        snprintf(buf, sizeof(buf), "%dhops", contact.out_path_len);
-        if (is_selected) {
-            display.setColor(DisplayDriver::BLUE);
-        } else {
-            display.setColor(DisplayDriver::YELLOW);
-        }
-        display.setCursor(190, y + 7);
-        display.print(buf);
-
-        // 最后见时间
-        if (is_selected) {
-            display.setColor(DisplayDriver::BLUE);
-        } else {
-            display.setColor(DisplayDriver::GREEN);
-        }
-        display.setCursor(10, y + 18);
-        snprintf(buf, sizeof(buf), "Last: %us ago",
-                 (unsigned)(rtc_clock.getCurrentTime() - contact.lastmod));
-        display.print(buf);
-    }
-
-    // 空状态
-    if (num_contacts == 0) {
-        display.setColor(DisplayDriver::LIGHT);
-        display.setTextSize(2);
-        display.setCursor(50, y_start + 50);
-        display.print("No nodes yet");
-        display.setTextSize(1);
-        display.setCursor(55, y_start + 80);
-        display.print("Advertise to find peers");
-    }
-}
-
-// ========= PAGE 2: CHANNELS =========
-void render_channels() {
-    char buf[64];
-
-    draw_header("Channels");
-
-    // 频道列表（简化版 — 这3个频道是系统预设的）
-    const char* channels[] = {"Broadcast", "Contacts", "Direct"};
-    int num_channels = 3;
-
-    const int ITEM_H = 28;
-    int y_start = 40;
-
-    // 选中项边界检查
-    if (_channels_selected >= num_channels) _channels_selected = 0;
-    if (_channels_selected < 0) _channels_selected = num_channels - 1;
-
-    // 让选中项保持在可见区域内
-    if (_channels_selected >= _channels_scroll + 7)
-        _channels_scroll = _channels_selected - 6;
-    if (_channels_selected < _channels_scroll)
-        _channels_scroll = _channels_selected;
-    if (_channels_scroll < 0) _channels_scroll = 0;
-
-    for (int i = 0; i < 7; i++) {
-        int idx = _channels_scroll + i;
-        if (idx >= num_channels) break;
-
-        int y = y_start + i * ITEM_H;
-        bool is_selected = (idx == _channels_selected);
-
-        // 选中 = 白色反色
-        if (is_selected) {
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(4, y + 2, 232, ITEM_H - 4);
-            display.setColor(DisplayDriver::DARK);
-        } else {
-            display.setColor(DisplayDriver::LIGHT);
-        }
-
-        display.setTextSize(2);
-        display.setCursor(10, y + 7);
-        display.print(channels[idx]);
-
-        // 指示点
-        display.setColor(is_selected ? DisplayDriver::BLUE : DisplayDriver::YELLOW);
-        display.fillRect(220, y + 11, 6, 6);
-
-        // 白色下边线
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(4, y + ITEM_H - 2, 232, 1);
-    }
-
-    // 频道说明
-    display.setColor(DisplayDriver::LIGHT);
-    display.setTextSize(1);
-    display.setCursor(4, y_start + 7 * ITEM_H);
-    snprintf(buf, sizeof(buf), "Channels: %d", num_channels);
-    display.print(buf);
-}
-
-// ========= PAGE 3: CHAT（聊天，只读气泡） =========
-void render_chat() {
-    char buf[64];
-    char title_buf[48];
-
-    // 根据来源确定标题
-    if (_chat_parent == MenuScreen::CHANNELS) {
-        const char* channels[] = {"Broadcast", "Contacts", "Direct"};
-        snprintf(title_buf, sizeof(title_buf), "%s", channels[_channels_selected]);
-    } else {
-        ContactInfo c;
-        if (the_mesh.getContactByIdx(_contacts_selected, c)) {
-            strncpy(title_buf, c.name, sizeof(title_buf) - 1);
-            title_buf[sizeof(title_buf) - 1] = '\0';
-        } else {
-            snprintf(title_buf, sizeof(title_buf), "Chat");
-        }
-    }
-
-    // 标题栏
-    draw_header(title_buf);
-
-    // 聊天消息区
-    const int MAX_MSGS = 6;
-    const int BUBBLE_H = 32;
-    int y_start = 35;
-
-    int num_contacts = the_mesh.getNumContacts();
-    long uptime = rtc_clock.getCurrentTime();
-
-    display.setTextSize(1);
-
-    // 气泡 1：系统欢迎
-    int y = y_start;
-    display.setColor(DisplayDriver::BLUE);
-    display.fillRect(8, y, 224, BUBBLE_H);
-    display.setColor(DisplayDriver::LIGHT);
-    display.setCursor(14, y + 6);
-    display.print("System: Welcome to MeshCore");
-    display.setCursor(14, y + 18);
-    snprintf(buf, sizeof(buf), "Node: %s", the_mesh.getNodeName());
-    display.print(buf);
-    // display.setColor(DisplayDriver::LIGHT);
-    // display.fillRect(8, y + BUBBLE_H, 224, 1);
-
-    // 气泡 2：当前聊天对象信息
-    // if (_chat_parent == MenuScreen::CONTACTS && num_contacts > 0) {
-    //     ContactInfo c;
-    //     if (the_mesh.getContactByIdx(_contacts_selected, c)) {
-    //         y += BUBBLE_H + 3;
-    //         display.setColor(DisplayDriver::GREEN);
-    //         display.fillRect(8, y, 224, BUBBLE_H);
-    //         display.setColor(DisplayDriver::DARK);
-    //         display.setCursor(14, y + 6);
-    //         snprintf(buf, sizeof(buf), "Peer: %s", c.name);
-    //         display.print(buf);
-    //         display.setCursor(14, y + 18);
-    //         snprintf(buf, sizeof(buf), "%d hops · %us ago", c.out_path_len,
-    //                  (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
-    //         display.print(buf);
-    //         // display.setColor(DisplayDriver::LIGHT);
-    //         // display.fillRect(8, y + BUBBLE_H, 224, 1);
-    //     }
-    // } else {
-    //     y += BUBBLE_H + 3;
-    //     display.setColor(DisplayDriver::GREEN);
-    //     display.fillRect(8, y, 224, BUBBLE_H);
-    //     display.setColor(DisplayDriver::DARK);
-    //     display.setCursor(14, y + 6);
-    //     snprintf(buf, sizeof(buf), "Channel: %s", title_buf);
-    //     display.print(buf);
-    //     display.setCursor(14, y + 18);
-    //     snprintf(buf, sizeof(buf), "%d peers in network", num_contacts);
-    //     display.print(buf);
-    //     // display.setColor(DisplayDriver::LIGHT);
-    //     // display.fillRect(8, y + BUBBLE_H, 224, 1);
-    // }
-
-    // 气泡 3：运行时间
-    // y += BUBBLE_H + 3;
-    // display.setColor(DisplayDriver::LIGHT);
-    // display.drawRect(8, y, 224, BUBBLE_H);
-    // display.setColor(DisplayDriver::LIGHT);
-    // display.setCursor(14, y + 6);
-    // snprintf(buf, sizeof(buf), "Uptime: %ldmin", uptime / 60);
-    // display.print(buf);
-    // display.setCursor(14, y + 18);
-    // snprintf(buf, sizeof(buf), "Msg queue: %d pending", (int)the_mesh.getNumContacts());
-    // display.print(buf);
-    // display.fillRect(8, y + BUBBLE_H, 224, 1);
-
-    // 气泡 4：最新节点（如果有联系人）
-    if (num_contacts > 0) {
-        y += BUBBLE_H + 3;
-        display.setColor(DisplayDriver::GREEN);
-        display.fillRect(8, y, 224, BUBBLE_H);
-        display.setColor(DisplayDriver::DARK);
-        display.setCursor(14, y + 6);
-
-        ContactInfo c;
-        char filtered[32];
-        if (the_mesh.getContactByIdx(0, c)) {
-            strncpy(filtered, c.name, sizeof(filtered));
-            filtered[sizeof(filtered) - 1] = '\0';
-            snprintf(buf, sizeof(buf), "Latest: %s (%d hops)", filtered, c.out_path_len);
-            display.print(buf);
-            display.setCursor(14, y + 18);
-            snprintf(buf, sizeof(buf), "Seen: %us ago", (unsigned)(rtc_clock.getCurrentTime() - c.lastmod));
-            display.print(buf);
-        }
-        // display.setColor(DisplayDriver::LIGHT);
-        // display.fillRect(8, y + BUBBLE_H, 224, 1);
-    }
-}
-
-// ========= PAGE 4: SETTINGS =========
-void render_settings_main_menu() {
-    char buf[32];
-
-    // 顶部：SETTINGS
-    draw_header("Settings");
-
-    // 子分类列表（5 项）
-    const char* categories[] = {"Public Info", "Radio Setup", "Theme", "Other", "Device Info"};
-    int num_cats = 5;
-
-    const int ITEM_H = 28;
-    int y_start = 40;
-
-    // 限制滚动
-    if (_settings_menu_idx >= num_cats)
-        _settings_menu_idx = num_cats - 1;
-    if (_settings_menu_idx < 0) _settings_menu_idx = 0;
-
-    for (int i = 0; i < num_cats; i++) {
-        int y = y_start + i * ITEM_H;
-
-        // 选中框（当前选中的高亮）
-        if (i == _settings_menu_idx) {
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(4, y, 232, ITEM_H - 2);
-            display.setColor(DisplayDriver::DARK);
-        }
-
-        display.setTextSize(2);
-        display.setCursor(10, y + 7);
-        display.print(categories[i]);
-
-        // 白色下边线
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(4, y + ITEM_H - 2, 232, 1);
-    }
-}
-
-void render_settings_public_info() {
-    char buf[64];
-    draw_header("Public Info");
-
-    int y = 40;
-
-    // 用户名
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Name");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print(the_mesh.getNodeName());
-
-    // BLE PIN
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("BLE PIN");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%06lu", (unsigned long)the_mesh.getBLEPin());
-    display.print(buf);
-}
-
-void render_settings_radio_setup() {
-    char buf[64];
-    draw_header("Radio Setup");
-
-    int y = 40;
-
-    // Frequency
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Frequency");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%.1f MHz", LORA_FREQ);
-    display.print(buf);
-
-    // Spreading Factor
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Spreading Factor");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "SF%d", LORA_SF);
-    display.print(buf);
-
-    // Bandwidth
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Bandwidth");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%.1f kHz", LORA_BW);
-    display.print(buf);
-
-    // TX Power
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("TX Power");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%d dBm", LORA_TX_POWER);
-    display.print(buf);
-}
-
-void render_settings_theme() {
-    draw_header("Theme");
-
-    int y = 40;
-
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Backlight");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print("5%");
-    // 白色下边线
-    // display.setColor(DisplayDriver::LIGHT);
-    // display.fillRect(4, y + 38, 232, 1);
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Main Color");
-    display.setTextSize(2);
-    display.setColor(DisplayDriver::BLUE);
-    display.setCursor(10, y + 18);
-    display.print("BLUE");
-    // 白色下边线
-    // display.setColor(DisplayDriver::LIGHT);
-    // display.fillRect(4, y + 38, 232, 1);
-
-    y += 34;
-    display.setColor(DisplayDriver::LIGHT);
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Screen Timeout");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print(_timeout_labels[_timeout_selected_idx]);
-    // 白色下边线
-    display.fillRect(4, y + 38, 232, 1);
-}
-
-void render_settings_other() {
-    draw_header("Other");
-
-    int y = 40;
-
-    // 显示当前时间
-    uint32_t now_secs = rtc_clock.getCurrentTime();
-    int h = (now_secs / 3600) % 24;
-    int m = (now_secs % 3600) / 60;
-    char time_buf[16];
-    snprintf(time_buf, sizeof(time_buf), "%02d:%02d", h, m);
-
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Set Time");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print(time_buf);
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Battery");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print("OK");
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Factory Reset");
-    display.setTextSize(2);
-    display.setColor(DisplayDriver::RED);
-    display.setCursor(10, y + 18);
-    display.print("Hold to reset");
-}
-
-// 渲染时间设置界面
-void render_time_set() {
-    draw_header("Set Time");
-
-    char num_buf[8];
-    const int TEXT_SIZE = 6;
-    const int CHAR_W = 6;  // (5+1) * 1
-    const int TIME_STR_WIDTH = 5 * CHAR_W * TEXT_SIZE;  // "00:00" = 5 chars
-    const int TIME_X = (240 - TIME_STR_WIDTH) / 2;  // 居中 x = 30
-    const int TIME_Y = 70;
-
-    display.setTextSize(TEXT_SIZE);
-
-    // 高亮当前编辑字段
-    if (_time_editing) {
-        if (_time_edit_field == 0) {
-            // 编辑小时 - 白色高亮
-            int hour_w = 2 * CHAR_W * TEXT_SIZE;  // "00"
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(TIME_X, TIME_Y, hour_w, CHAR_W * TEXT_SIZE);
-            display.setColor(DisplayDriver::DARK);
-            display.setCursor(TIME_X, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
-            display.print(num_buf);
-            // 冒号
-            display.setColor(DisplayDriver::LIGHT);
-            display.setCursor(TIME_X + hour_w, TIME_Y);
-            display.print(":");
-            // 分钟
-            display.setCursor(TIME_X + hour_w + CHAR_W * TEXT_SIZE, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
-            display.print(num_buf);
-        } else {
-            // 编辑分钟 - 白色高亮
-            int hour_w = 2 * CHAR_W * TEXT_SIZE;
-            int colon_w = CHAR_W * TEXT_SIZE;
-            // 小时
-            display.setColor(DisplayDriver::LIGHT);
-            display.setCursor(TIME_X, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
-            display.print(num_buf);
-            // 冒号
-            display.setCursor(TIME_X + hour_w, TIME_Y);
-            display.print(":");
-            // 分钟高亮
-            int min_x = TIME_X + hour_w + colon_w;
-            int min_w = 2 * CHAR_W * TEXT_SIZE;
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(min_x, TIME_Y, min_w, CHAR_W * TEXT_SIZE);
-            display.setColor(DisplayDriver::DARK);
-            display.setCursor(min_x, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
-            display.print(num_buf);
-        }
-    } else {
-        // 未进入编辑模式，用蓝色高亮当前选中的字段
-        if (_time_edit_field == 0) {
-            // 选中小时 - 蓝色高亮
-            int hour_w = 2 * CHAR_W * TEXT_SIZE;
-            display.setColor(DisplayDriver::BLUE);
-            display.fillRect(TIME_X, TIME_Y, hour_w, CHAR_W * TEXT_SIZE);
-            display.setColor(DisplayDriver::LIGHT);
-            display.setCursor(TIME_X, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
-            display.print(num_buf);
-            // 冒号
-            display.setCursor(TIME_X + hour_w, TIME_Y);
-            display.print(":");
-            // 分钟
-            display.setCursor(TIME_X + hour_w + CHAR_W * TEXT_SIZE, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
-            display.print(num_buf);
-        } else {
-            // 选中分钟 - 蓝色高亮
-            int hour_w = 2 * CHAR_W * TEXT_SIZE;
-            int colon_w = CHAR_W * TEXT_SIZE;
-            // 小时
-            display.setColor(DisplayDriver::LIGHT);
-            display.setCursor(TIME_X, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_hour);
-            display.print(num_buf);
-            // 冒号
-            display.setCursor(TIME_X + hour_w, TIME_Y);
-            display.print(":");
-            // 分钟高亮
-            int min_x = TIME_X + hour_w + colon_w;
-            int min_w = 2 * CHAR_W * TEXT_SIZE;
-            display.setColor(DisplayDriver::BLUE);
-            display.fillRect(min_x, TIME_Y, min_w, CHAR_W * TEXT_SIZE);
-            display.setColor(DisplayDriver::LIGHT);
-            display.setCursor(min_x, TIME_Y);
-            snprintf(num_buf, sizeof(num_buf), "%02d", _time_edit_minute);
-            display.print(num_buf);
-        }
-    }
-
-    // 提示
-    display.setTextSize(1);
-    display.setCursor(10, 160);
-    if (!_time_editing) {
-        display.print("G0: Select  G45: Switch field");
-    } else {
-        display.print("G0: +1  G45: -1  Long: Save");
-    }
-}
-
-// 渲染超时选项选择界面
-void render_timeout_select() {
-    draw_header("Screen Timeout");
-
-    const int ITEM_H = 28;
-    int y_start = 40;
-
-    for (int i = 0; i < _timeout_options_count; i++) {
-        int y = y_start + i * ITEM_H;
-
-        // 选中项高亮
-        if (i == _timeout_selected_idx) {
-            display.setColor(DisplayDriver::LIGHT);
-            display.fillRect(4, y, 232, ITEM_H - 2);
-            display.setColor(DisplayDriver::DARK);
-        }
-
-        display.setTextSize(2);
-        display.setCursor(10, y + 7);
-        display.print(_timeout_labels[i]);
-
-        // 白色下边线
-        display.setColor(DisplayDriver::LIGHT);
-        display.fillRect(4, y + ITEM_H - 2, 232, 1);
-    }
-}
-
-void render_settings_device_info() {
-    char buf[64];
-    draw_header("Device Info");
-
-    int y = 40;
-
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Node Name");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    display.print(the_mesh.getNodeName());
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Firmware");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "v1.0");
-    display.print(buf);
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Radio");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "SX1268 %.1f MHz", LORA_FREQ);
-    display.print(buf);
-
-    y += 34;
-    display.setTextSize(1);
-    display.setCursor(10, y + 6);
-    display.print("Uptime");
-    display.setTextSize(2);
-    display.setCursor(10, y + 18);
-    snprintf(buf, sizeof(buf), "%ldmin", rtc_clock.getCurrentTime() / 60);
-    display.print(buf);
-}
-
-void render_settings() {
-    if (_in_time_set) {
-        render_time_set();
-    } else if (_in_timeout_select) {
-        render_timeout_select();
-    } else if (!_settings_selected) {
-        render_settings_main_menu();
-    } else {
-        switch (_settings_category) {
-            case SettingsCategory::MAIN_MENU:
-                render_settings_main_menu();
-                break;
-            case SettingsCategory::PUBLIC_INFO:
-                render_settings_public_info();
-                break;
-            case SettingsCategory::RADIO_SETUP:
-                render_settings_radio_setup();
-                break;
-            case SettingsCategory::THEME:
-                render_settings_theme();
-                break;
-            case SettingsCategory::OTHER:
-                render_settings_other();
-                break;
-            case SettingsCategory::DEVICE_INFO:
-                render_settings_device_info();
-                break;
-        }
-    }
-}
-
-// ========= 主渲染函数 =========
-void draw_status_screen() {
-    unsigned long t0 = millis();
-    Serial.printf("[UI] Render start: page=%d\n", (int)_menu_state);
-
-    display.startFrame(DisplayDriver::DARK);
-
-    // === 画正式页面内容 ===
-    switch (_menu_state) {
-        case MenuScreen::HOME:
-            render_home();
-            break;
-        case MenuScreen::CONTACTS:
-            render_contacts();
-            break;
-        case MenuScreen::CHANNELS:
-            render_channels();
-            break;
-        case MenuScreen::CHAT:
-            render_chat();
-            break;
-        case MenuScreen::SETTINGS:
-            render_settings();
-            break;
-    }
-
-    // 底部栏 - 所有页面都显示tab bar
-    draw_tab_bar();
-
-    display.endFrame();
-    Serial.printf("[UI] Render total: %lums\n", millis() - t0);
-}
-
-#endif  // CUSTOM_BOARD
-
-// ===================== LOOP =====================
-
 void loop() {
-
 #ifdef CUSTOM_BOARD
   if (_screen_off) {
-    the_mesh.loop();  // ← 保持 LoRa/BLE
+    the_mesh.loop();
 
     pinMode(0, INPUT_PULLUP);
     gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(100000ULL);
-    esp_light_sleep_start(); // ← 避免唤醒后立即进入下一次休眠循环
-    // 醒来后检测 G0
+    esp_light_sleep_start();
+    
     if (digitalRead(0) == LOW) {
       _screen_off = false;
       _just_woken = true;
-      _last_activity = millis();  // ← 重置休眠计时器
+      _last_activity = millis();
       Serial.println("[UI] Screen wake by G0");
       display.turnOn();
     }
-    return;  // ← 继续休眠循环
+    return;
   }
 #endif
 
-  static bool mesh_loop_debug_printed = false;
-  if (!mesh_loop_debug_printed) {
-    Serial.println("[Main] the_mesh.loop() called");
-    mesh_loop_debug_printed = true;
-  }
   the_mesh.loop();
+  lv_timer_handler();
 
-  // Test mode: continuous send/receive
-  static unsigned long last_test_send = 0;
-  if (millis() - last_test_send > 2000) {  // Send every 2 seconds
-    last_test_send = millis();
-    // Send a test packet using the mesh API
-    mesh::Packet* pkt = the_mesh.obtainNewPacket();
-    if (pkt) {
-      pkt->header = (PAYLOAD_VER_1 << PH_VER_SHIFT) | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
-      pkt->payload_len = 6;
-      memcpy(pkt->payload, "\xAA\xBB\xCC\xDD\xEE\xFF", 6);
-      Serial.println("[TEST] Sending test packet...");
-      the_mesh.sendPacket(pkt, 0);  // priority 0
-    }
-  }
-
-  // Check if packet received
-  static unsigned long last_recv_check = 0;
-  if (millis() - last_recv_check > 1000) {  // Check every 1 second
-    last_recv_check = millis();
-    // The mesh loop should handle receiving automatically
-    // Just print a status message
-    Serial.println("[TEST] Waiting for packets...");
-  }
-
-  // 收到新消息时刷新页面
   if (_new_message) {
     _new_message = false;
-    next_refresh = 0;  // 立即刷新
+    next_refresh = 0;
+    update_contacts_list();
   }
 
 #ifdef BLE_PIN_CODE
-  // 检查蓝牙连接后是否需要自动同步时间
   if (serial_interface.checkAndRequestTimeSync()) {
     Serial.println("[BLE] Time sync request sent");
   }
@@ -1196,291 +819,183 @@ void loop() {
     return;
   }
 
-  // 按钮输入（与 cardputer 的键盘处理类似，但简化为 2 个按钮）
-  int btn_g0 = user_btn.check();    // GPIO0: 动作键（Enter/Advert/Scroll）
-  int btn_g45 = user_btn2.check();  // GPIO45: 切页键（Next）——注意长按交给硬件关机
+  int btn_g0 = user_btn.check();
+  int btn_g45 = user_btn2.check();
 
-  // 屏幕关闭时，任何按键唤醒屏幕
   if (_screen_off && (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE)) {
     display.turnOn();
     _screen_off = false;
     _last_activity = now;
     _just_woken = true;
     Serial.println("[UI] Screen wake up");
-    draw_status_screen();
     next_refresh = now + 60000;
     return;
   }
 
-  // 有按键交互时重置休眠计时器
   if (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE) {
     _last_activity = now;
     if(_just_woken) {
       _just_woken = false;
-      Serial.println("[UI] Just woken up, ignoring first button press");
-    //   return;  // 忽略唤醒后的第一次按键，避免误操作
     }
   }
 
-  // --- G45 (Next / Scroll down) ---
+  // G45 按钮处理
   if (btn_g45 == BUTTON_EVENT_CLICK) {
     board.beep(150, 1500);
     Serial.println("[UI] G45: Next");
 
-    // 处理超时选择模式
     if (_in_timeout_select) {
         _timeout_selected_idx = (_timeout_selected_idx + 1) % _timeout_options_count;
-        draw_status_screen();
+        update_settings_list();
         return;
     }
 
-    // 处理时间设置模式
     if (_in_time_set) {
         if (!_time_editing) {
-            // 未编辑状态：G45 切换时/分字段
             _time_edit_field = (_time_edit_field + 1) % 2;
         } else {
-            // 编辑状态：G45 递减
             if (_time_edit_field == 0) {
-                _time_edit_hour = (_time_edit_hour + 23) % 24;  // -1 等价于 +23
+                _time_edit_hour = (_time_edit_hour + 23) % 24;
             } else {
-                _time_edit_minute = (_time_edit_minute + 59) % 60;  // -1 等价于 +59
+                _time_edit_minute = (_time_edit_minute + 59) % 60;
             }
         }
-        draw_status_screen();
         return;
     }
 
-    if (_menu_state == MenuScreen::HOME) {
-        // Home：进入 Contacts
-        _menu_state = MenuScreen::CONTACTS;
-        Serial.println("[UI] G45: Home -> Contacts");
-    } else if (_menu_state == MenuScreen::SETTINGS && !_settings_selected) {
-        // 设置主菜单：向下滚动选中项
-        const int num_cats = 5;
-        _settings_menu_idx = (_settings_menu_idx + 1) % num_cats;
-        Serial.printf("[UI] G45: Settings menu idx=%d\n", _settings_menu_idx);
-    } else if (_menu_state == MenuScreen::SETTINGS && _settings_selected) {
-        // 设置子分类：返回 Contacts
-        _settings_selected = false;
-        _menu_state = MenuScreen::CONTACTS;
-        Serial.println("[UI] G45: Back to Contacts from settings");
-    } else if (_menu_state == MenuScreen::CONTACTS) {
-        // Contacts：向下移动选中项；已在最后一项则切到下一个 tab
-        int num_contacts = the_mesh.getNumContacts();
-        if (num_contacts > 0) {
-            if (_contacts_selected >= num_contacts - 1) {
-                _menu_state = MenuScreen::CHANNELS;
-                Serial.println("[UI] G45: Contacts -> Channels");
-            } else {
-                _contacts_selected++;
-                Serial.printf("[UI] G45: Contact select=%d\n", _contacts_selected);
-            }
-        } else {
-            _menu_state = MenuScreen::CHANNELS;
-            Serial.println("[UI] G45: (no contacts) Contacts -> Channels");
-        }
-    } else if (_menu_state == MenuScreen::CHANNELS) {
-        // Channels：向下移动选中项；已在最后一项则切到下一个 tab
-        const int num_channels = 3;
-        if (_channels_selected >= num_channels - 1) {
-            _menu_state = MenuScreen::SETTINGS;
-            Serial.println("[UI] G45: Channels -> Settings");
-        } else {
-            _channels_selected++;
-            Serial.printf("[UI] G45: Channel select=%d\n", _channels_selected);
-        }
-    } else if (_menu_state == MenuScreen::CHAT) {
-        // Chat：滚动消息（当前简化为滚动聊天内容的滚动位）
-        _chat_scroll++;
-        Serial.println("[UI] G45: Chat scroll");
+    // 如果Chat页面可见，隐藏它
+    if (_chat_visible) {
+        hide_chat_overlay();
+        return;
     }
 
-    draw_status_screen();
+    // G45短按始终切换到下一个tab
+    uint16_t current_tab = lv_tabview_get_tab_act(tabview);
+    if (current_tab < 3) {
+        lv_tabview_set_act(tabview, current_tab + 1, LV_ANIM_OFF);
+    } else {
+        lv_tabview_set_act(tabview, 0, LV_ANIM_OFF);
+    }
+    
     next_refresh = now + 60000;
   }
 
-  // --- G0 长按（返回上一级 / 保存时间）- 必须在 CLICK 之前处理 ---
+  // G0 长按 - 确认/进入列表项
   if (btn_g0 == BUTTON_EVENT_LONG_PRESS) {
     board.beep(200, 1000);
-    user_btn.cancelClick();  // 阻止松开时触发 CLICK
+    user_btn.cancelClick();
 
-    // 处理时间设置模式：长按保存时间并退出
     if (_in_time_set) {
-        // 计算新的时间戳
         uint32_t now_secs = rtc_clock.getCurrentTime();
         int cur_h = (now_secs / 3600) % 24;
         int cur_m = (now_secs % 3600) / 60;
         int cur_s = now_secs % 60;
-        // 用当前日期部分 + 新的小时/分钟
         int days = now_secs / 86400;
         uint32_t new_secs = (uint32_t)days * 86400 + (uint32_t)_time_edit_hour * 3600 + (uint32_t)_time_edit_minute * 60 + cur_s;
         rtc_clock.setCurrentTime(new_secs);
         _in_time_set = false;
         _time_editing = false;
         Serial.printf("[UI] G0 long: Time set to %02d:%02d (epoch=%lu)\n", _time_edit_hour, _time_edit_minute, new_secs);
-        draw_status_screen();
-        next_refresh = now + 60000;
         return;
     }
 
-    // 处理超时选择模式：取消选择，返回 Theme 设置页
     if (_in_timeout_select) {
         _in_timeout_select = false;
-        Serial.println("[UI] G0 long: Cancel timeout selection");
-        draw_status_screen();
-        next_refresh = now + 60000;
+        NodePrefs* prefs = the_mesh.getNodePrefs();
+        prefs->screen_timeout_seconds = _timeout_options[_timeout_selected_idx];
+        the_mesh.savePrefs();
+        Serial.printf("[UI] G0 long: Timeout set to %s (%ds)\n", _timeout_labels[_timeout_selected_idx], _timeout_options[_timeout_selected_idx]);
+        update_settings_list();
         return;
     }
 
-    if (_menu_state == MenuScreen::SETTINGS && _settings_selected) {
-        // 设置子分类：返回设置主菜单
-        _settings_selected = false;
-        Serial.println("[UI] G0 long: Back to settings main menu");
-    } else if (_menu_state == MenuScreen::CHAT) {
-        // Chat：返回进入前的来源页面（Contacts 或 Channels）
-        _menu_state = _chat_parent;
-        Serial.printf("[UI] G0 long: Chat -> back to %s\n",
-                      _chat_parent == MenuScreen::CONTACTS ? "Contacts" : "Channels");
-    } else if (_menu_state == MenuScreen::SETTINGS) {
-        // Settings：返回 Channels
-        _menu_state = MenuScreen::CHANNELS;
-        _channels_selected = 0;
-        Serial.println("[UI] G0 long: Settings -> Channels");
-    } else if (_menu_state == MenuScreen::CHANNELS) {
-        // Channels：返回 Contacts
-        _menu_state = MenuScreen::CONTACTS;
-        Serial.println("[UI] G0 long: Channels -> Contacts");
-    } else if (_menu_state == MenuScreen::CONTACTS) {
-        // Contacts：返回 Home
-        _menu_state = MenuScreen::HOME;
-        Serial.println("[UI] G0 long: Contacts -> Home");
-    } else if (_menu_state == MenuScreen::HOME) {
-        // Home：进入 Settings（循环）
-        _menu_state = MenuScreen::SETTINGS;
-        Serial.println("[UI] G0 long: Home -> Settings");
+    // 如果Chat页面可见，隐藏它
+    if (_chat_visible) {
+        hide_chat_overlay();
+        return;
     }
 
-    draw_status_screen();
+    // G0长按：如果已在子菜单中则返回上一级，否则进入列表项
+    uint16_t current_tab = lv_tabview_get_tab_act(tabview);
+    if (current_tab == 3) { // Settings tab
+        if (_settings_selected) { // 已在子菜单，返回主菜单
+            _settings_selected = false;
+            update_settings_list();
+            return;
+        }
+        // 主菜单，进入子菜单
+        _settings_selected = true;
+        update_settings_list();
+    } else if (current_tab == 1) { // Contacts tab - 进入联系人Chat
+        int num_contacts = the_mesh.getNumContacts();
+        if (num_contacts > 0 && _contacts_selected < num_contacts) {
+            _chat_parent = MenuScreen::CONTACTS;
+            show_chat_overlay("Contact Chat");
+        }
+    } else if (current_tab == 2) { // Channels tab - 进入频道Chat
+        _chat_parent = MenuScreen::CHANNELS;
+        show_chat_overlay("Channel Chat");
+    } else if (current_tab == 0) { // Home tab - 跳转Settings
+        lv_tabview_set_act(tabview, 3, LV_ANIM_OFF);
+    }
+
     next_refresh = now + 60000;
   }
 
-  // --- G0 (Enter / Select) ---
+  // G0 短按 - 切换列表选中项
   if (btn_g0 == BUTTON_EVENT_CLICK) {
     board.beep(100, 2000);
 
-    // 处理时间设置模式
     if (_in_time_set) {
         if (!_time_editing) {
-            // 未编辑状态：G0 进入编辑模式，初始化当前值
             _time_editing = true;
             uint32_t now_secs = rtc_clock.getCurrentTime();
             _time_edit_hour = (now_secs / 3600) % 24;
             _time_edit_minute = (now_secs % 3600) / 60;
         } else {
-            // 编辑状态：G0 递增
             if (_time_edit_field == 0) {
                 _time_edit_hour = (_time_edit_hour + 1) % 24;
             } else {
                 _time_edit_minute = (_time_edit_minute + 1) % 60;
             }
         }
-        draw_status_screen();
         return;
     }
 
-    // 处理超时选择模式：确认选择并返回 Theme 设置页
     if (_in_timeout_select) {
-        _in_timeout_select = false;
-        // 保存到持久化存储
-        NodePrefs* prefs = the_mesh.getNodePrefs();
-        prefs->screen_timeout_seconds = _timeout_options[_timeout_selected_idx];
-        the_mesh.savePrefs();
-        Serial.printf("[UI] G0: Timeout set to %s (%ds)\n", _timeout_labels[_timeout_selected_idx], _timeout_options[_timeout_selected_idx]);
-        draw_status_screen();
-        next_refresh = now + 60000;
+        _timeout_selected_idx = (_timeout_selected_idx + 1) % _timeout_options_count;
+        update_settings_list();
         return;
     }
 
-    if (_menu_state == MenuScreen::SETTINGS) {
+    uint16_t current_tab = lv_tabview_get_tab_act(tabview);
+    
+    if (current_tab == 3) { // Settings tab - 切换设置选中项
         if (!_settings_selected) {
-            // 进入选中的子分类
-            _settings_selected = true;
-            switch (_settings_menu_idx) {
-                case 0: _settings_category = SettingsCategory::PUBLIC_INFO; break;
-                case 1: _settings_category = SettingsCategory::RADIO_SETUP; break;
-                case 2: _settings_category = SettingsCategory::THEME; break;
-                case 3: _settings_category = SettingsCategory::OTHER; break;
-                case 4: _settings_category = SettingsCategory::DEVICE_INFO; break;
-                default: _settings_category = SettingsCategory::MAIN_MENU; break;
-            }
-            Serial.println("[UI] G0: Enter settings category");
-        } else {
-            // 在子分类中：如果是 Theme 页面，进入超时选择模式
-            if (_settings_category == SettingsCategory::THEME) {
-                _in_timeout_select = true;
-                Serial.println("[UI] G0: Enter timeout selection");
-                draw_status_screen();
-                next_refresh = now + 60000;
-                return;
-            }
-            // 在子分类中：如果是 Other 页面，进入时间设置模式
-            if (_settings_category == SettingsCategory::OTHER) {
-                _in_time_set = true;
-                _time_edit_field = 0;
-                _time_editing = false;
-                uint32_t now_secs = rtc_clock.getCurrentTime();
-                _time_edit_hour = (now_secs / 3600) % 24;
-                _time_edit_minute = (now_secs % 3600) / 60;
-                Serial.println("[UI] G0: Enter time set");
-                draw_status_screen();
-                next_refresh = now + 60000;
-                return;
-            }
-            _settings_selected = false;
-            Serial.println("[UI] G0: Back to main settings");
+            _settings_menu_idx = (_settings_menu_idx + 1) % 5;
+            update_settings_list();
         }
-    } else if (_menu_state == MenuScreen::HOME) {
-        // Home 页：进入 Settings
-        _menu_state = MenuScreen::SETTINGS;
-        Serial.println("[UI] G0: Home -> Settings");
-    } else if (_menu_state == MenuScreen::CONTACTS) {
-        // Contacts 页：进入选中联系人的聊天
+    } else if (current_tab == 0) { // Home tab - 无操作或跳转
+    } else if (current_tab == 1) { // Contacts tab - 切换联系人选中项
         int num_contacts = the_mesh.getNumContacts();
-        if (num_contacts > 0 && _contacts_selected < num_contacts) {
-            _chat_parent = MenuScreen::CONTACTS;
-            _menu_state = MenuScreen::CHAT;
-            ContactInfo c;
-            if (the_mesh.getContactByIdx(_contacts_selected, c)) {
-                Serial.printf("[UI] G0: Enter chat with %s\n", c.name);
-            } else {
-                Serial.println("[UI] G0: Enter chat with contact");
-            }
-        } else {
-            // 没有联系人时，发送广播发现节点
-            Serial.println("[UI] G0: No contacts — sending advert");
-            the_mesh.advert();
+        if (num_contacts > 0) {
+            _contacts_selected = (_contacts_selected + 1) % num_contacts;
+            update_contacts_list();
         }
-    } else if (_menu_state == MenuScreen::CHANNELS) {
-        // Channels 页：进入选中频道的聊天
-        _chat_parent = MenuScreen::CHANNELS;
-        _menu_state = MenuScreen::CHAT;
-        const char* channels[] = {"Broadcast", "Contacts", "Direct"};
-        Serial.printf("[UI] G0: Enter channel chat: %s\n", channels[_channels_selected]);
-    } else if (_menu_state == MenuScreen::CHAT) {
-        // Chat 页：发送广播（当前简化为 advert）
-        Serial.println("[UI] G0: Chat — sending advert");
-        the_mesh.advert();
+    } else if (current_tab == 2) { // Channels tab - 切换频道选中项
+        _channels_selected = (_channels_selected + 1) % 3;
+        update_channels_list();
     }
-
-    draw_status_screen();
+    
     next_refresh = now + 60000;
   }
 
-  // --- 定期刷新屏幕（60秒一次） ---
-  if (now >= next_refresh) {    
-    draw_status_screen();
-    next_refresh = now + 60000;
+  // 定期刷新
+  if (millis() > next_refresh && next_refresh != 0) {
+    update_contacts_list();
+    update_channels_list();
+    update_settings_list();
+    next_refresh = millis() + 60000;
   }
-#endif  // CUSTOM_BOARD
+#endif
 }
