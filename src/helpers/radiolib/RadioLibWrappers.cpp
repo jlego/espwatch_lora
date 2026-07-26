@@ -1,10 +1,6 @@
 
 #define RADIOLIB_STATIC_ONLY 1
 #include "RadioLibWrappers.h"
-#ifdef RADIOLIB_CUSTOM_SX1268
-#include "CustomSX1268.h"
-#endif
-#include <SPI.h>
 
 #define STATE_IDLE       0
 #define STATE_RX         1
@@ -16,20 +12,6 @@
 #define SAMPLING_THRESHOLD  14
 
 static volatile uint8_t state = STATE_IDLE;
-
-// Raw SPI read of SX126x chip status (works around RadioLib getStatus() bug)
-// RadioLib's SX126x::getStatus() calls SPIreadStream with numBytes=0 which
-// never copies the status byte due to statusPos=1 offset. This function
-// uses the same raw SPI approach as the init probe in target.cpp.
-static uint8_t readSX126xStatusRaw() {
-  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(P_LORA_NSS, LOW);
-  SPI.transfer(0xC0);                    // GET_STATUS command
-  uint8_t status = SPI.transfer(0x00);   // read status byte
-  digitalWrite(P_LORA_NSS, HIGH);
-  SPI.endTransaction();
-  return status;
-}
 
 // this function is called when a complete packet
 // is transmitted by the module
@@ -43,7 +25,9 @@ void setFlag(void) {
 }
 
 void RadioLibWrapper::begin() {
+#if P_LORA_DIO_1 != -1
   _radio->setPacketReceivedAction(setFlag);  // this is also SentComplete interrupt
+#endif
   state = STATE_IDLE;
 
   if (_board->getStartupReason() == BD_STARTUP_RX_PACKET) {  // received a LoRa packet (while in deep sleep)
@@ -81,45 +65,35 @@ void RadioLibWrapper::resetAGC() {
 }
 
 void RadioLibWrapper::loop() {
-  static unsigned long debugLog = 0;
-  if (millis() - debugLog > 10000) {
-    Serial.printf("[RX] loop() called, state=%d, DIO1=%d\n", state, P_LORA_DIO_1);
-#if defined(SX126X_RXEN) && defined(SX126X_TXEN)
-    Serial.printf("[RX] RF switch pins: RXEN=%d, TXEN=%d\n", digitalRead(SX126X_RXEN), digitalRead(SX126X_TXEN));
-#endif
-    debugLog = millis();
-  }
 #if P_LORA_DIO_1 == -1
-  // No DIO1 pin - poll for packet reception in loop()
+  if (state == STATE_TX_WAIT) {
+    if (digitalRead(P_LORA_BUSY) == HIGH) {
+      return;
+    }
+    Serial.println("[LoRa] TX_WAIT: BUSY went LOW, setting INT_READY");
+    state |= STATE_INT_READY;
+  }
   if (state == STATE_RX) {
     int pktLen = _radio->getPacketLength();
-    static unsigned long pollLog = 0;
-    if (pktLen > 0) {
-      // Packet received
-      Serial.printf("[RX] Packet detected! len=%d\n", pktLen);
-      state |= STATE_INT_READY;
-    } else if (millis() - pollLog > 3000) {
-      // Read SX1268 IRQ flags and raw status
-      uint16_t irq = ((SX126x *)_radio)->getIrqFlags();
-      uint8_t status = readSX126xStatusRaw();
-      uint8_t chip_mode = (status >> 4) & 0x03;
-      float rssi = ((SX126x *)_radio)->getRSSI();
-      Serial.printf("[RX] Polling... pktLen=%d, IRQ=0x%04X, chip_mode=%d, RSSI=%.1f\n", pktLen, irq, chip_mode, rssi);
-      pollLog = millis();
+    static unsigned long rx_debug_last = 0;
+    if (millis() - rx_debug_last > 1000) {  // 每秒采样
+      int rssi = getCurrentRSSI();
+      int busy = digitalRead(P_LORA_BUSY);
+      Serial.printf("[LoRa] RX debug: pktLen=%d, rssi=%d, busy=%d\n", 
+                    pktLen, rssi, busy);
+      rx_debug_last = millis();
     }
-  } else {
-    // Debug: log state if not in RX
-    static unsigned long lastLog = 0;
-    if (millis() - lastLog > 5000) {
-      Serial.printf("[RX] Not in RX mode, state=%d\n", state);
-      lastLog = millis();
+    if (pktLen > 0) {
+      Serial.printf("[LoRa] RX: Packet detected, len=%d\n", pktLen);
+      state |= STATE_INT_READY;
     }
   }
 #endif
+
   if (state == STATE_RX && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
     if (!isReceivingPacket()) {
       int rssi = getCurrentRSSI();
-      if (rssi < _noise_floor + SAMPLING_THRESHOLD) {  // only consider samples below current floor + sampling THRESHOLD
+      if (rssi < _noise_floor + SAMPLING_THRESHOLD) {
         _num_floor_samples++;
         _floor_sample_sum += rssi;
       }
@@ -127,7 +101,7 @@ void RadioLibWrapper::loop() {
   } else if (_num_floor_samples >= NUM_NOISE_FLOOR_SAMPLES && _floor_sample_sum != 0) {
     _noise_floor = _floor_sample_sum / NUM_NOISE_FLOOR_SAMPLES;
     if (_noise_floor < -120) {
-      _noise_floor = -120;    // clamp to lower bound of -120dBi
+      _noise_floor = -120;
     }
     _floor_sample_sum = 0;
 
@@ -136,19 +110,17 @@ void RadioLibWrapper::loop() {
 }
 
 void RadioLibWrapper::startRecv() {
-#if defined(SX126X_RXEN) && defined(SX126X_TXEN)
-  Serial.printf("[RX] startRecv: RXEN=%d, TXEN=%d\n", digitalRead(SX126X_RXEN), digitalRead(SX126X_TXEN));
+  Serial.println("[LoRa] startRecv() called");
+#if defined(P_LORA_RXEN) && defined(P_LORA_TXEN)
+  digitalWrite(P_LORA_RXEN, HIGH);
+  digitalWrite(P_LORA_TXEN, LOW);
+  Serial.println("[LoRa] RX mode: RXEN=HIGH, TXEN=LOW");
 #endif
   int err = _radio->startReceive();
-  Serial.printf("[RX] startReceive returned: %d\n", err);
+  Serial.printf("[LoRa] startReceive returned: %d\n", err);
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_RX;
-    delay(5);
-    uint8_t status = readSX126xStatusRaw();
-    uint8_t chip_mode = (status >> 4) & 0x03;
-    Serial.printf("[RX] After startRecv: raw_status=0x%02X, chip_mode=%d, RXEN=%d, TXEN=%d\n",
-                  status, chip_mode,
-                  digitalRead(SX126X_RXEN), digitalRead(SX126X_TXEN));
+    Serial.println("[LoRa] State set to STATE_RX");
   } else {
     MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startReceive(%d)", err);
   }
@@ -160,19 +132,13 @@ bool RadioLibWrapper::isInRecvMode() const {
 
 int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   int len = 0;
-#if P_LORA_DIO_1 == -1
-  // No DIO1 pin - poll for packet reception
-  if (state == STATE_RX) {
-    int pktLen = _radio->getPacketLength();
-    if (pktLen > 0) {
-      // Packet received
-      state |= STATE_INT_READY;
-    }
+  static bool recv_debug_printed = false;
+  if (!recv_debug_printed) {
+    Serial.printf("[LoRa] recvRaw called: state=%d\n", state);
+    recv_debug_printed = true;
   }
-#endif
   if (state & STATE_INT_READY) {
     len = _radio->getPacketLength();
-    Serial.printf("[RX] STATE_INT_READY set, pktLen=%d\n", len);
     if (len > 0) {
       if (len > sz) { len = sz; }
       int err = _radio->readData(bytes, len);
@@ -188,24 +154,16 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
   }
 
   if (state != STATE_RX) {
-    Serial.printf("[RX] Calling startReceive() from recvRaw, state=%d\n", state);
+    Serial.printf("[LoRa] recvRaw: state=%d, calling startReceive()\n", state);
+#if defined(P_LORA_RXEN) && defined(P_LORA_TXEN)
+    digitalWrite(P_LORA_RXEN, HIGH);  // RX on
+    digitalWrite(P_LORA_TXEN, LOW);   // TX off
+    Serial.println("[LoRa] recvRaw: RX mode: RXEN=HIGH, TXEN=LOW");
+#endif
     int err = _radio->startReceive();
-    Serial.printf("[RX] startReceive returned: %d\n", err);
+    Serial.printf("[LoRa] recvRaw: startReceive returned: %d\n", err);
     if (err == RADIOLIB_ERR_NONE) {
       state = STATE_RX;
-      // Read SX1268 status after startReceive (using raw SPI to avoid RadioLib getStatus() bug)
-      delay(10);
-      uint16_t irq = ((SX126x *)_radio)->getIrqFlags();
-      uint8_t status = readSX126xStatusRaw();
-      uint8_t chip_mode = (status >> 4) & 0x03;
-      const char* mode_str = "???";
-      switch (chip_mode) {
-        case 0x00: mode_str = "STBY_RC"; break;
-        case 0x01: mode_str = "STBY_XOSC"; break;
-        case 0x02: mode_str = "FS"; break;
-        case 0x03: mode_str = "RX/TX"; break;
-      }
-      Serial.printf("[RX] After startReceive: IRQ=0x%04X, STATUS=0x%02X (chip_mode=%s)\n", irq, status, mode_str);
     } else {
       MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startReceive(%d)", err);
     }
@@ -218,50 +176,28 @@ uint32_t RadioLibWrapper::getEstAirtimeFor(int len_bytes) {
 }
 
 bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
-  _board->onBeforeTransmit();
-#if defined(SX126X_RXEN) && defined(SX126X_TXEN)
-  // Manually set RF switch to TX mode
-  digitalWrite(SX126X_RXEN, LOW);
-  digitalWrite(SX126X_TXEN, HIGH);
-  Serial.printf("[TX] RF switch: RXEN=0, TXEN=1\n");
-  delay(1);
+  Serial.printf("[LoRa] startSendRaw: len=%d\n", len);
+#if defined(P_LORA_RXEN) && defined(P_LORA_TXEN)
+  digitalWrite(P_LORA_RXEN, LOW);
+  digitalWrite(P_LORA_TXEN, HIGH);
+  Serial.println("[LoRa] TX mode: TXEN=HIGH, RXEN=LOW");
 #endif
-  // Ensure chip is in standby before transmit
-  Serial.println("[TX] Before standby()");
-  _radio->standby();
-  delay(5);
-  Serial.println("[TX] Calling startTransmit()");
+  _board->onBeforeTransmit();
   int err = _radio->startTransmit((uint8_t *) bytes, len);
-  Serial.printf("[TX] startTransmit returned: %d\n", err);
+  Serial.printf("[LoRa] startTransmit returned: %d\n", err);
   if (err == RADIOLIB_ERR_NONE) {
-#if P_LORA_DIO_1 == -1
-    // No DIO1 pin - poll for transmit completion
-    Serial.println("[TX] Polling for TX completion (no DIO1)");
-    err = _radio->finishTransmit();
-    Serial.printf("[TX] finishTransmit returned: %d\n", err);
-    if (err == RADIOLIB_ERR_NONE) {
-      n_sent++;
-      _board->onAfterTransmit();
-      state = STATE_INT_READY;  // Signal completion to Dispatcher
-      return true;
-    } else {
-      MESH_DEBUG_PRINTLN("RadioLibWrapper: error: finishTransmit(%d)", err);
-      idle();
-      return false;
-    }
-#else
     state = STATE_TX_WAIT;
     return true;
-#endif
   }
   MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startTransmit(%d)", err);
-  idle();   // trigger another startRecv()
+  idle();
   return false;
 }
 
 bool RadioLibWrapper::isSendComplete() {
-  if (state & STATE_INT_READY) {
-    Serial.println("[TX] isSendComplete() -> true");
+  bool complete = (state & STATE_INT_READY) != 0;
+  Serial.printf("[LoRa] isSendComplete: state=%d, complete=%d\n", state, complete);
+  if (complete) {
     state = STATE_IDLE;
     n_sent++;
     return true;
@@ -270,17 +206,15 @@ bool RadioLibWrapper::isSendComplete() {
 }
 
 void RadioLibWrapper::onSendFinished() {
-#if defined(SX126X_RXEN) && defined(SX126X_TXEN)
-  // Manually set RF switch back to RX mode
-  digitalWrite(SX126X_RXEN, HIGH);
-  digitalWrite(SX126X_TXEN, LOW);
-  Serial.printf("[TX] RF switch after TX: RXEN=1, TXEN=0\n");
-  delay(1);
-#endif
+  Serial.println("[LoRa] onSendFinished called");
   _radio->finishTransmit();
   _board->onAfterTransmit();
+#if defined(P_LORA_RXEN) && defined(P_LORA_TXEN)
+  digitalWrite(P_LORA_RXEN, HIGH);
+  digitalWrite(P_LORA_TXEN, LOW);
+  Serial.println("[LoRa] TX done, back to RX mode: RXEN=HIGH, TXEN=LOW");
+#endif
   state = STATE_IDLE;
-  Serial.println("[TX] onSendFinished() done, state=IDLE");
 }
 
 bool RadioLibWrapper::isChannelActive() {

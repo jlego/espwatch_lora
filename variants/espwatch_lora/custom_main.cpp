@@ -1142,7 +1142,36 @@ void loop() {
   }
 #endif
 
+  static bool mesh_loop_debug_printed = false;
+  if (!mesh_loop_debug_printed) {
+    Serial.println("[Main] the_mesh.loop() called");
+    mesh_loop_debug_printed = true;
+  }
   the_mesh.loop();
+
+  // Test mode: continuous send/receive
+  static unsigned long last_test_send = 0;
+  if (millis() - last_test_send > 2000) {  // Send every 2 seconds
+    last_test_send = millis();
+    // Send a test packet using the mesh API
+    mesh::Packet* pkt = the_mesh.obtainNewPacket();
+    if (pkt) {
+      pkt->header = (PAYLOAD_VER_1 << PH_VER_SHIFT) | (PAYLOAD_TYPE_RAW_CUSTOM << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD;
+      pkt->payload_len = 6;
+      memcpy(pkt->payload, "\xAA\xBB\xCC\xDD\xEE\xFF", 6);
+      Serial.println("[TEST] Sending test packet...");
+      the_mesh.sendPacket(pkt, 0);  // priority 0
+    }
+  }
+
+  // Check if packet received
+  static unsigned long last_recv_check = 0;
+  if (millis() - last_recv_check > 1000) {  // Check every 1 second
+    last_recv_check = millis();
+    // The mesh loop should handle receiving automatically
+    // Just print a status message
+    Serial.println("[TEST] Waiting for packets...");
+  }
 
   // 收到新消息时刷新页面
   if (_new_message) {

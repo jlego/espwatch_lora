@@ -2,7 +2,7 @@
 
 #include <RadioLib.h>
 
-#define SX126X_IRQ_HEADER_VALID                     0b0000010000  //  4     4     valid LoRa header received
+#define SX126X_IRQ_HEADER_VALID                     0b0000010000
 #define SX126X_IRQ_PREAMBLE_DETECTED           0x04
 
 class CustomSX1268 : public SX1268 {
@@ -17,17 +17,9 @@ class CustomSX1268 : public SX1268 {
     {
   #ifdef SX126X_DIO3_TCXO_VOLTAGE
       float tcxo = SX126X_DIO3_TCXO_VOLTAGE;
-      Serial.printf("[LoRa] TCXO voltage from config: %.1fV\n", tcxo);
   #else
-      float tcxo = 0.0f;  // Default to no TCXO (most modules don't have it)
-      Serial.println("[LoRa] No TCXO config, using 0.0V");
+      float tcxo = 1.6f;
   #endif
-
-  // E22-400MM22S has no TCXO - force 0.0V if TCXO voltage is set but chip doesn't have one
-  // This is a workaround for modules that don't use TCXO
-  if (tcxo > 0.0f) {
-    Serial.println("[LoRa] WARNING: TCXO voltage > 0 but module may not have TCXO");
-  }
 
   #ifdef LORA_CR
       uint8_t cr = LORA_CR;
@@ -41,7 +33,6 @@ class CustomSX1268 : public SX1268 {
     #elif defined(RP2040_PLATFORM)
       if (spi) {
         spi->setMISO(P_LORA_MISO);
-        //spi->setCS(P_LORA_NSS); // Setting CS results in freeze
         spi->setSCK(P_LORA_SCLK);
         spi->setMOSI(P_LORA_MOSI);
         spi->begin();
@@ -50,44 +41,40 @@ class CustomSX1268 : public SX1268 {
       if (spi) spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
     #endif
   #endif
-      int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
-      // if radio init fails with -707/-706, try again with tcxo voltage set to 0.0f
+
+      int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, 0x3444, LORA_TX_POWER, 16, tcxo);
       if (status == RADIOLIB_ERR_SPI_CMD_FAILED || status == RADIOLIB_ERR_SPI_CMD_INVALID) {
-        Serial.println("[LoRa] First begin() failed, retrying with TCXO=0.0V...");
-        // Force chip to standby before retry
-        standby();
-        delay(10);
-        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, 0.0f);
+        tcxo = 0.0f;
+        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, 0x3444, LORA_TX_POWER, 16, tcxo);
       }
       if (status != RADIOLIB_ERR_NONE) {
         Serial.print("ERROR: radio init failed: ");
         Serial.println(status);
-        return false;  // fail
+        return false;
       }
-      Serial.println("[LoRa] begin() succeeded");
-    
+
       setCRC(1);
-  
+
   #ifdef SX126X_CURRENT_LIMIT
       setCurrentLimit(SX126X_CURRENT_LIMIT);
   #endif
-  #ifdef SX126X_DIO2_AS_RF_SWITCH
+  #if defined(SX126X_DIO2_AS_RF_SWITCH)
       setDio2AsRfSwitch(SX126X_DIO2_AS_RF_SWITCH);
+      Serial.printf("[LoRa] DIO2 configured as RF switch\n");
+  #elif defined(P_LORA_RXEN) && defined(P_LORA_TXEN)
+      // Configure external RF switch pins
+      pinMode(P_LORA_RXEN, OUTPUT);
+      pinMode(P_LORA_TXEN, OUTPUT);
+      digitalWrite(P_LORA_RXEN, HIGH);  // Default to RX mode
+      digitalWrite(P_LORA_TXEN, LOW);
+      Serial.printf("[LoRa] External RF switch configured: RXEN=%d (HIGH), TXEN=%d (LOW)\n", P_LORA_RXEN, P_LORA_TXEN);
   #endif
-  #ifdef SX126X_RX_BOOSTED_GAIN
-      setRxBoostedGainMode(SX126X_RX_BOOSTED_GAIN);
-  #endif
-  #if defined(SX126X_RXEN) || defined(SX126X_TXEN)
-    #ifndef SX1262X_RXEN
-      #define SX1262X_RXEN RADIOLIB_NC
-    #endif
-    #ifndef SX1262X_TXEN
-      #define SX1262X_TXEN RADIOLIB_NC
-    #endif
-      setRfSwitchPins(SX126X_RXEN, SX126X_TXEN);
-  #endif 
 
-      return true;  // success
+      Serial.printf("[LoRa] PA config: paDutyCycle=4, hpMax=7, deviceSel=0 (SX1268 HP)\n");
+      Serial.printf("[LoRa] Init OK: freq=%.3f, bw=%.1f, sf=%d, cr=%d, power=%d, tcxo=%.1f\n",
+                    LORA_FREQ, LORA_BW, LORA_SF, cr, LORA_TX_POWER, tcxo);
+
+      return true;
     }
 
     bool isReceiving() {

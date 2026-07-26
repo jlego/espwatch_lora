@@ -456,23 +456,7 @@ bool radio_init() {
 #elif defined(SX1268_RADIO)
     Serial.println("[LoRa] SX1268 initialized successfully");
 #endif
-    // E22-400MM22S uses external RF switch and PA, skip setPaConfig
-    // Only configure setPaConfig for modules with internal PA
-#if !defined(SX126X_RXEN) && !defined(SX126X_TXEN)
-    Serial.println("[LoRa] Configuring PA");
-#ifdef SX1262_RADIO
-    int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
-#elif defined(SX1268_RADIO)
-    int16_t pa_result = radio.setPaConfig(0x04, 0x07, 0x00, 0x01);
-#endif
-    if (pa_result == 0) {
-      Serial.println("[LoRa] PA configured successfully");
-    } else {
-      Serial.printf("[LoRa] PA config failed: %d (non-fatal, continuing)\n", pa_result);
-    }
-#else
-    Serial.println("[LoRa] Using external RF switch/PA - skipping setPaConfig");
-#endif
+    // PA config is now handled in CustomSX1268::std_init()
   } else {
 #ifdef SX1262_RADIO
     Serial.println("[LoRa] ERROR: SX1262 initialization failed!");
