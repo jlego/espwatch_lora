@@ -48,6 +48,11 @@ static unsigned long get_screen_timeout_ms() {
   ArduinoSerialInterface serial_interface;
 #endif
 
+// Chat 前向声明
+static bool _chat_visible = false;
+static void add_chat_message(const char* from_name, const char* text, bool is_outgoing, bool is_channel, const char* target);
+static void update_chat_list();
+
 class SimpleUITask : public AbstractUITask {
 public:
     SimpleUITask() : AbstractUITask(nullptr, nullptr) {}
@@ -55,6 +60,16 @@ public:
     void msgRead(int msgcount) override {}
     void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override {
         _new_message = true;
+        // Store in chat history - received message
+        // Determine if it's a channel or direct message based on path_len
+        bool is_channel = (path_len > 0);
+        const char* target = is_channel ? "Broadcast" : from_name;
+        add_chat_message(from_name, text, false, is_channel, target);
+        
+        // If chat overlay is visible for this conversation, refresh it
+        if (_chat_visible) {
+            update_chat_list();
+        }
     }
     void onDiscoveredContact(ContactInfo& ci, bool is_new, uint8_t path_len, const uint8_t* path) {
         _new_message = true;
@@ -86,6 +101,159 @@ static lv_obj_t *tab_contacts = nullptr;
 static lv_obj_t *tab_channels = nullptr;
 static lv_obj_t *tab_settings = nullptr;
 
+// 状态变量
+enum class MenuScreen {
+    HOME, CONTACTS, CHANNELS, CHAT, SETTINGS
+};
+
+enum class SettingsCategory {
+    MAIN_MENU, PUBLIC_INFO, RADIO_SETUP, THEME, OTHER, DEVICE_INFO
+};
+
+static MenuScreen _menu_state = MenuScreen::HOME;
+static MenuScreen _chat_parent = MenuScreen::CONTACTS;
+static SettingsCategory _settings_category = SettingsCategory::MAIN_MENU;
+static int _settings_menu_idx = 0;
+static int _contacts_selected = 0;
+static int _channels_selected = 0;
+static bool _settings_selected = false;
+
+// Chat 页面管理
+static lv_obj_t *chat_overlay = nullptr;
+static lv_obj_t *lbl_chat_title_overlay = nullptr;
+static lv_obj_t *lst_chat_overlay = nullptr;
+
+// Chat message history
+#define MAX_CHAT_MESSAGES 50
+struct ChatMessage {
+    char text[128];
+    char from_name[32];
+    char contact_or_channel[32];
+    bool is_outgoing;
+    bool is_channel;
+};
+static ChatMessage _chat_history[MAX_CHAT_MESSAGES];
+static int _chat_history_count = 0;
+
+static void add_chat_message(const char* from_name, const char* text, bool is_outgoing, bool is_channel, const char* target) {
+    if (_chat_history_count >= MAX_CHAT_MESSAGES) {
+        // Shift all messages up to make room
+        for (int i = 0; i < MAX_CHAT_MESSAGES - 1; i++) {
+            _chat_history[i] = _chat_history[i + 1];
+        }
+        _chat_history_count = MAX_CHAT_MESSAGES - 1;
+    }
+    ChatMessage& msg = _chat_history[_chat_history_count];
+    strncpy(msg.from_name, from_name, sizeof(msg.from_name) - 1);
+    msg.from_name[sizeof(msg.from_name) - 1] = '\0';
+    strncpy(msg.text, text, sizeof(msg.text) - 1);
+    msg.text[sizeof(msg.text) - 1] = '\0';
+    strncpy(msg.contact_or_channel, target, sizeof(msg.contact_or_channel) - 1);
+    msg.contact_or_channel[sizeof(msg.contact_or_channel) - 1] = '\0';
+    msg.is_outgoing = is_outgoing;
+    msg.is_channel = is_channel;
+    _chat_history_count++;
+}
+
+static void update_chat_list() {
+    if (lst_chat_overlay == nullptr) return;
+    lv_obj_clean(lst_chat_overlay);
+    
+    // Get current contact/channel name for filtering
+    const char* current_name = nullptr;
+    bool is_channel = false;
+    if (_chat_parent == MenuScreen::CHANNELS) {
+        // Get channel name
+        static char ch_name[32];
+        const char* channels[] = {"Broadcast", "Contacts", "Direct"};
+        if (_channels_selected < 3) {
+            strncpy(ch_name, channels[_channels_selected], sizeof(ch_name) - 1);
+        } else {
+            snprintf(ch_name, sizeof(ch_name), "Ch%d", _channels_selected);
+        }
+        ch_name[sizeof(ch_name) - 1] = '\0';
+        current_name = ch_name;
+        is_channel = true;
+    } else {
+        ContactInfo c;
+        static char ct_name[32];
+        if (the_mesh.getContactByIdx(_contacts_selected, c)) {
+            strncpy(ct_name, c.name, sizeof(ct_name) - 1);
+        } else {
+            strncpy(ct_name, "Unknown", sizeof(ct_name) - 1);
+        }
+        ct_name[sizeof(ct_name) - 1] = '\0';
+        current_name = ct_name;
+        is_channel = false;
+    }
+    
+    // Collect matching messages (newest first)
+    int filtered_indices[MAX_CHAT_MESSAGES];
+    int filtered_count = 0;
+    for (int i = _chat_history_count - 1; i >= 0; i--) {
+        ChatMessage& msg = _chat_history[i];
+        if (msg.is_channel == is_channel && strcmp(msg.contact_or_channel, current_name) == 0) {
+            filtered_indices[filtered_count++] = i;
+        }
+    }
+    
+    if (filtered_count == 0) {
+        lv_obj_t* hint = lv_label_create(lst_chat_overlay);
+        lv_label_set_text(hint, "No messages yet");
+        lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_pad_top(hint, 20, 0);
+        return;
+    }
+    
+    // Show up to 10 messages
+    int show_count = filtered_count;
+    if (show_count > 10) show_count = 10;
+    
+    for (int i = 0; i < show_count; i++) {
+        ChatMessage& msg = _chat_history[filtered_indices[i]];
+        
+        // Container for each message
+        lv_obj_t* msg_container = lv_obj_create(lst_chat_overlay);
+        lv_obj_set_width(msg_container, lv_pct(90));
+        lv_obj_set_height(msg_container, LV_SIZE_CONTENT);
+        lv_obj_set_style_border_width(msg_container, 0, 0);
+        lv_obj_set_style_pad_all(msg_container, 6, 0);
+        lv_obj_set_style_radius(msg_container, 8, 0);
+        
+        if (msg.is_outgoing) {
+            // Sent message - green background, right aligned
+            lv_obj_set_style_bg_color(msg_container, lv_color_hex(0x00B050), 0);
+            lv_obj_set_style_bg_opa(msg_container, LV_OPA_COVER, 0);
+            lv_obj_set_align(msg_container, LV_ALIGN_RIGHT_MID);
+            lv_obj_set_style_pad_bottom(msg_container, 4, 0);
+        } else {
+            // Received message - blue background, left aligned
+            lv_obj_set_style_bg_color(msg_container, lv_color_hex(0x0096d8), 0);
+            lv_obj_set_style_bg_opa(msg_container, LV_OPA_COVER, 0);
+            lv_obj_set_align(msg_container, LV_ALIGN_LEFT_MID);
+            lv_obj_set_style_pad_bottom(msg_container, 4, 0);
+        }
+        
+        // Sender name (for received messages)
+        if (!msg.is_outgoing) {
+            lv_obj_t* name_label = lv_label_create(msg_container);
+            lv_label_set_text(name_label, msg.from_name);
+            lv_obj_set_style_text_font(name_label, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(name_label, lv_color_hex(0xAADDFF), 0);
+        }
+        
+        // Message text
+        lv_obj_t* text_label = lv_label_create(msg_container);
+        lv_label_set_text(text_label, msg.text);
+        lv_obj_set_style_text_font(text_label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(text_label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_width(text_label, lv_pct(100));
+    }
+}
+
 // Home 页对象
 static lv_obj_t *lbl_time = nullptr;
 static lv_obj_t *lbl_date = nullptr;
@@ -111,23 +279,6 @@ static lv_obj_t *lst_channels = nullptr;
 // Settings 页对象
 static lv_obj_t *lst_settings = nullptr;
 static lv_obj_t *lbl_settings_detail = nullptr;
-
-// 状态变量
-enum class MenuScreen {
-    HOME, CONTACTS, CHANNELS, CHAT, SETTINGS
-};
-
-enum class SettingsCategory {
-    MAIN_MENU, PUBLIC_INFO, RADIO_SETUP, THEME, OTHER, DEVICE_INFO
-};
-
-static MenuScreen _menu_state = MenuScreen::HOME;
-static MenuScreen _chat_parent = MenuScreen::CONTACTS;
-static SettingsCategory _settings_category = SettingsCategory::MAIN_MENU;
-static int _settings_menu_idx = 0;
-static int _contacts_selected = 0;
-static int _channels_selected = 0;
-static bool _settings_selected = false;
 
 // ==================== 点阵时钟实现 ====================
 // 点阵定义 (3x7)
@@ -466,8 +617,12 @@ static void make_section_title(lv_obj_t *parent, const char* text) {
     lv_label_set_text(title, text);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0x00B050), 0);
-    lv_obj_set_style_pad_top(title, 8, 0);
-    lv_obj_set_style_pad_bottom(title, 8, 0);
+    lv_obj_set_style_pad_top(title, 0, 0);
+    lv_obj_set_style_pad_bottom(title, 0, 0);
+    lv_obj_set_style_border_width(title, 1, 0);
+    lv_obj_set_style_border_color(title, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_border_side(title, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_width(title, lv_pct(100));
 }
 
 static void make_field_label(lv_obj_t *parent, const char* text) {
@@ -525,7 +680,7 @@ void update_settings_list() {
             lv_obj_center(label);
         }
         
-        make_hint(lst_settings, "G0:Next  Long:Save");
+        make_hint(lst_settings, "G0:Select  G45:Scroll  Long:Save");
     } else if (_in_time_set) {
         make_section_title(lst_settings, "Set Time");
         
@@ -665,12 +820,6 @@ void update_settings_list() {
     }
 }
 
-// Chat 页面管理
-static bool _chat_visible = false;
-static lv_obj_t *chat_overlay = nullptr;
-static lv_obj_t *lbl_chat_title_overlay = nullptr;
-static lv_obj_t *lst_chat_overlay = nullptr;
-
 void show_chat_overlay(const char* title) {
     if (chat_overlay == nullptr) {
         chat_overlay = lv_obj_create(lv_scr_act());
@@ -687,16 +836,24 @@ void show_chat_overlay(const char* title) {
         lbl_chat_title_overlay = lv_label_create(chat_overlay);
         lv_obj_set_style_text_font(lbl_chat_title_overlay, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(lbl_chat_title_overlay, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_align(lbl_chat_title_overlay, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(lbl_chat_title_overlay, lv_pct(100));
+        lv_obj_set_style_bg_color(lbl_chat_title_overlay, lv_color_hex(0x333333), 0);
+        lv_obj_set_style_bg_opa(lbl_chat_title_overlay, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_top(lbl_chat_title_overlay, 5, 0);
+        lv_obj_set_style_pad_bottom(lbl_chat_title_overlay, 5, 0);
         
         lst_chat_overlay = lv_list_create(chat_overlay);
         lv_obj_set_size(lst_chat_overlay, lv_pct(100), lv_pct(90));
+        lv_obj_set_style_border_width(lst_chat_overlay, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(lst_chat_overlay, lv_color_hex(0x000000), 0);
         lv_obj_set_scrollbar_mode(lst_chat_overlay, LV_SCROLLBAR_MODE_OFF);
         lv_obj_set_style_width(lst_chat_overlay, 0, LV_PART_SCROLLBAR);
         lv_obj_set_style_bg_opa(lst_chat_overlay, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
     }
     
     lv_label_set_text(lbl_chat_title_overlay, title);
-    lv_obj_clean(lst_chat_overlay);
+    update_chat_list();
     
     lv_obj_clear_flag(chat_overlay, LV_OBJ_FLAG_HIDDEN);
     _chat_visible = true;
@@ -1194,8 +1351,7 @@ void loop() {
     Serial.println("[UI] G45: Next");
 
     if (_in_timeout_select) {
-        _timeout_selected_idx = (_timeout_selected_idx + 1) % _timeout_options_count;
-        update_settings_list();
+        lv_obj_scroll_by(lst_settings, 0, -30, LV_ANIM_ON);
         return;
     }
 
