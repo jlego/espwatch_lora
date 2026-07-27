@@ -90,6 +90,16 @@ static lv_obj_t *tab_settings = nullptr;
 static lv_obj_t *lbl_time = nullptr;
 static lv_obj_t *lbl_date = nullptr;
 static lv_obj_t *lbl_batt = nullptr;
+static lv_obj_t *lbl_batt_icon = nullptr;
+static lv_obj_t *home_top_row = nullptr;
+
+// 点阵时钟对象
+static lv_obj_t *digit_containers[5][7][3] = {nullptr}; // 5个数字(含冒号) x 7行 x 3列
+static lv_obj_t *clock_container = nullptr; // 时钟容器
+static bool time_initialized = false;
+static int last_update_minute = -1;
+static int current_combination_index = 0;
+static bool srand_initialized = false;
 
 // Contacts 页对象
 static lv_obj_t *lst_contacts = nullptr;
@@ -118,6 +128,150 @@ static int _settings_menu_idx = 0;
 static int _contacts_selected = 0;
 static int _channels_selected = 0;
 static bool _settings_selected = false;
+
+// ==================== 点阵时钟实现 ====================
+// 点阵定义 (3x7)
+static const uint16_t digit_matrix[11][7] = {
+    {0x07,0x05,0x05,0x05,0x07,0x00,0x00}, // 0
+    {0x02,0x02,0x02,0x02,0x02,0x00,0x00}, // 1
+    {0x07,0x01,0x07,0x04,0x07,0x00,0x00}, // 2
+    {0x07,0x01,0x07,0x01,0x07,0x00,0x00}, // 3
+    {0x05,0x05,0x07,0x01,0x01,0x00,0x00}, // 4
+    {0x07,0x04,0x07,0x01,0x07,0x00,0x00}, // 5
+    {0x07,0x04,0x07,0x05,0x07,0x00,0x00}, // 6
+    {0x07,0x01,0x01,0x01,0x01,0x00,0x00}, // 7
+    {0x07,0x05,0x07,0x05,0x07,0x00,0x00}, // 8
+    {0x07,0x05,0x07,0x01,0x07,0x00,0x00}, // 9
+    {0x00,0x02,0x00,0x02,0x00,0x00,0x00}  // : (冒号)
+};
+
+// 预设色彩搭配
+static const struct ColorPair {
+    lv_color_t top_color;
+    lv_color_t bottom_color;
+} color_pairs[] = {
+    {lv_color_hex(0x80D1C8), lv_color_hex(0x6bbdb4)}, // 蒂芙尼蓝
+    {lv_color_hex(0xFFD4AA), lv_color_hex(0xf3c08f)}, // 浅驼色
+    {lv_color_hex(0x012DA7), lv_color_hex(0x02278d)}, // 克莱茵蓝
+    {lv_color_hex(0xFF7F00), lv_color_hex(0xe47201)}, // 赤橙
+    {lv_color_hex(0x7A76C3), lv_color_hex(0x615cb1)}, // 风信子淡蓝
+    {lv_color_hex(0xC7B3A2), lv_color_hex(0xb29984)}, // 灰驼色
+    {lv_color_hex(0x8153FF), lv_color_hex(0x6b3ee6)}, // 藤紫
+    {lv_color_hex(0x93Dc24), lv_color_hex(0x7fc514)},  // 钛啡绿
+    {lv_color_hex(0xfd4569), lv_color_hex(0xf4355a)}, // 玫瑰红
+    {lv_color_hex(0x57c2c0), lv_color_hex(0x3ca5a3)},  // 石绿
+    {lv_color_hex(0x2082ff), lv_color_hex(0x1372ea)}, // 苏露青
+    {lv_color_hex(0xffdc64), lv_color_hex(0xf7d251)}  // 佛手黄
+};
+
+static const struct {
+    int hour_index;
+    int minute_index;
+} color_combinations[] = {
+    {0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}
+};
+
+// 创建点阵时钟容器
+void create_matrix_clock(lv_obj_t* parent) {
+    const int screen_width = 240;
+    const int block_size = screen_width / 18; // 每个小方格约13像素
+    const int digit_width = 3 * block_size;
+    const int digit_spacing = block_size;
+    const int wide_spacing = 3 * block_size;
+    
+    const int total_width = 4 * digit_width + 2 * digit_spacing + wide_spacing;
+    const int first_digit_left_edge = (screen_width - total_width) / 2;
+    const int second_digit_left_edge = first_digit_left_edge + digit_width + block_size;
+    const int colon_left_edge = second_digit_left_edge + digit_width;
+    const int third_digit_left_edge = colon_left_edge + wide_spacing;
+    const int fourth_digit_left_edge = third_digit_left_edge + digit_width + block_size;
+    
+    int digit_positions[] = {first_digit_left_edge, second_digit_left_edge, colon_left_edge, third_digit_left_edge, fourth_digit_left_edge};
+    
+    for(int d=0; d<5; d++){
+        for(int row=0; row<7; row++){
+            for(int col=0; col<3; col++){
+                lv_obj_t* block = lv_obj_create(parent);
+                if (block != nullptr) {
+                    lv_obj_set_size(block, block_size - 1, block_size - 1);
+                    lv_obj_set_pos(block, digit_positions[d] + col*block_size, row*block_size);
+                    lv_obj_set_style_border_width(block, 0, 0);
+                    lv_obj_set_style_radius(block, 1, 0);
+                    lv_obj_set_scrollbar_mode(block, LV_SCROLLBAR_MODE_OFF);
+                    lv_obj_set_style_bg_opa(block, LV_OPA_TRANSP, LV_PART_MAIN);
+                    digit_containers[d][row][col] = block;
+                }
+            }
+        }
+    }
+}
+
+// 绘制单个数字
+void draw_matrix_digit(int d_index, int num, lv_color_t top_color, lv_color_t bottom_color) {
+    if (num < 0 || num >= 11) return;
+    
+    lv_color_t gradient_start = lv_color_lighten(top_color, 128);
+    lv_color_t gradient_end = bottom_color;
+    
+    for(int row=0; row<7; row++){
+        for(int col=0; col<3; col++){
+            if (digit_containers[d_index][row][col] == nullptr) continue;
+            
+            if(digit_matrix[num][row] & (1 << (2-col))){
+                int max_sum = 8;
+                int current_sum = col + row;
+                uint8_t gradient_factor = (uint8_t)((current_sum * 255) / max_sum);
+                lv_color_t color = lv_color_mix(gradient_end, gradient_start, gradient_factor);
+                lv_obj_set_style_bg_color(digit_containers[d_index][row][col], color, LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(digit_containers[d_index][row][col], LV_OPA_COVER, LV_PART_MAIN);
+            } else {
+                lv_obj_set_style_bg_color(digit_containers[d_index][row][col], lv_color_black(), LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(digit_containers[d_index][row][col], LV_OPA_TRANSP, LV_PART_MAIN);
+            }
+        }
+    }
+}
+
+// 更新时间显示
+void update_matrix_clock(int hours, int minutes) {
+    if (!srand_initialized) {
+        srand(millis());
+        srand_initialized = true;
+    }
+    
+    const int num_combinations = sizeof(color_combinations) / sizeof(color_combinations[0]);
+    current_combination_index = rand() % num_combinations;
+    
+    int combination_index = current_combination_index;
+    int hour_color_index = color_combinations[combination_index].hour_index;
+    int minute_color_index = color_combinations[combination_index].minute_index;
+    
+    lv_color_t hour_top_color = color_pairs[hour_color_index].top_color;
+    lv_color_t hour_bottom_color = color_pairs[hour_color_index].bottom_color;
+    lv_color_t minute_top_color = color_pairs[minute_color_index].top_color;
+    lv_color_t minute_bottom_color = color_pairs[minute_color_index].bottom_color;
+    
+    draw_matrix_digit(0, hours/10, hour_top_color, hour_bottom_color);
+    draw_matrix_digit(1, hours%10, hour_top_color, hour_bottom_color);
+    draw_matrix_digit(2, 10, hour_top_color, hour_bottom_color);
+    draw_matrix_digit(3, minutes/10, minute_top_color, minute_bottom_color);
+    draw_matrix_digit(4, minutes%10, minute_top_color, minute_bottom_color);
+}
+
+// 清理点阵时钟
+void cleanup_matrix_clock() {
+    for(int d=0; d<5; d++){
+        for(int row=0; row<7; row++){
+            for(int col=0; col<3; col++){
+                if (digit_containers[d][row][col] != nullptr) {
+                    lv_obj_del(digit_containers[d][row][col]);
+                    digit_containers[d][row][col] = nullptr;
+                }
+            }
+        }
+    }
+}
+// ==================== 点阵时钟实现结束 ====================
 
 // LVGL 显示刷新回调
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
@@ -194,9 +348,12 @@ void update_time_display(lv_timer_t *timer) {
     int h = (now_secs / 3600) % 24;
     int m = (now_secs % 3600) / 60;
     
-    char time_buf[16];
-    snprintf(time_buf, sizeof(time_buf), "%02d:%02d", h, m);
-    lv_label_set_text(lbl_time, time_buf);
+    // 更新点阵时钟（每分钟更新一次）
+    if (m != last_update_minute || !time_initialized) {
+        update_matrix_clock(h, m);
+        last_update_minute = m;
+        time_initialized = true;
+    }
     
     // 计算日期
     int days = now_secs / 86400;
@@ -227,8 +384,24 @@ void update_time_display(lv_timer_t *timer) {
     // 更新电量
     uint8_t batt = board.getBattPercent();
     char batt_buf[16];
-    snprintf(batt_buf, sizeof(batt_buf), "Battery: %d%%", batt);
+    snprintf(batt_buf, sizeof(batt_buf), "%d", batt);
     lv_label_set_text(lbl_batt, batt_buf);
+    
+    // 更新电池图标
+    const char* batt_icon;
+    if (batt >= 80) batt_icon = LV_SYMBOL_BATTERY_FULL;
+    else if (batt >= 60) batt_icon = LV_SYMBOL_BATTERY_3;
+    else if (batt >= 40) batt_icon = LV_SYMBOL_BATTERY_2;
+    else if (batt >= 20) batt_icon = LV_SYMBOL_BATTERY_1;
+    else batt_icon = LV_SYMBOL_BATTERY_EMPTY;
+    lv_label_set_text(lbl_batt_icon, batt_icon);
+    
+    // 电量低于20%时图标变为红色，否则为绿色
+    if (batt < 20) {
+        lv_obj_set_style_text_color(lbl_batt_icon, lv_color_hex(0xFF0000), 0);
+    } else {
+        lv_obj_set_style_text_color(lbl_batt_icon, lv_color_hex(0x00B050), 0);
+    }
 }
 
 // 前向声明按钮回调函数
@@ -288,9 +461,39 @@ void update_channels_list() {
     }
 }
 
-// 更新设置列表
+static void make_section_title(lv_obj_t *parent, const char* text) {
+    lv_obj_t *title = lv_label_create(parent);
+    lv_label_set_text(title, text);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_pad_top(title, 8, 0);
+    lv_obj_set_style_pad_bottom(title, 8, 0);
+}
+
+static void make_field_label(lv_obj_t *parent, const char* text) {
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_pad_top(lbl, 4, 0);
+}
+
+static void make_field_value(lv_obj_t *parent, const char* text) {
+    lv_obj_t *val = lv_label_create(parent);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
+    lv_label_set_text(val, text);
+    lv_obj_set_style_pad_bottom(val, 4, 0);
+}
+
+static void make_hint(lv_obj_t *parent, const char* text) {
+    lv_obj_t *hint = lv_label_create(parent);
+    lv_label_set_text(hint, text);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xFFFF00), 0);
+    lv_obj_set_style_pad_top(hint, 12, 0);
+}
+
 void update_settings_list() {
     lv_obj_clean(lst_settings);
+    lv_obj_set_flex_flow(lst_settings, LV_FLEX_FLOW_COLUMN);
     
     if (!_settings_selected) {
         const char* categories[] = {"Public Info", "Radio Setup", "Theme", "Other", "Device Info"};
@@ -309,47 +512,151 @@ void update_settings_list() {
             lv_obj_add_event_cb(btn, settings_btn_event_cb, LV_EVENT_CLICKED, NULL);
             lv_obj_add_event_cb(btn, settings_btn_event_cb, LV_EVENT_KEY, NULL);
         }
+    } else if (_in_timeout_select) {
+        make_section_title(lst_settings, "Screen Timeout");
+        
+        for (int i = 0; i < _timeout_options_count; i++) {
+            lv_obj_t *btn = lv_btn_create(lst_settings);
+            lv_obj_set_width(btn, lv_pct(100));
+            lv_obj_set_style_bg_color(btn, (i == _timeout_selected_idx) ? lv_color_hex(0x0096d8) : lv_color_hex(0x333333), 0);
+            
+            lv_obj_t *label = lv_label_create(btn);
+            lv_label_set_text(label, _timeout_labels[i]);
+            lv_obj_center(label);
+        }
+        
+        make_hint(lst_settings, "G0:Next  Long:Save");
+    } else if (_in_time_set) {
+        make_section_title(lst_settings, "Set Time");
+        
+        char time_buf[16];
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d", _time_edit_hour, _time_edit_minute);
+        lv_obj_t *time_label = lv_label_create(lst_settings);
+        lv_obj_set_style_text_font(time_label, &lv_font_montserrat_48, 0);
+        lv_label_set_text(time_label, time_buf);
+        lv_obj_set_style_pad_top(time_label, 20, 0);
+        lv_obj_set_style_pad_bottom(time_label, 10, 0);
+        
+        lv_obj_t *field_hint = lv_label_create(lst_settings);
+        char field_buf[32];
+        if (_time_editing) {
+            snprintf(field_buf, sizeof(field_buf), "Editing: %s", _time_edit_field == 0 ? "Hour" : "Minute");
+        } else {
+            snprintf(field_buf, sizeof(field_buf), "Selected: %s", _time_edit_field == 0 ? "Hour" : "Minute");
+        }
+        lv_label_set_text(field_hint, field_buf);
+        lv_obj_set_style_text_color(field_hint, lv_color_hex(0x0096d8), 0);
+        
+        if (!_time_editing) {
+            make_hint(lst_settings, "G0:Edit  G45:Switch  Long:Save");
+        } else {
+            make_hint(lst_settings, "G0:+1  G45:-1  Long:Save");
+        }
     } else {
         switch (_settings_category) {
             case SettingsCategory::PUBLIC_INFO: {
-                lv_obj_t *label = lv_label_create(lst_settings);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Name: %s\nBLE PIN: %06lu", 
-                         the_mesh.getNodeName(), (unsigned long)the_mesh.getBLEPin());
-                lv_label_set_text(label, buf);
+                make_section_title(lst_settings, "Public Info");
+                
+                make_field_label(lst_settings, "Name");
+                make_field_value(lst_settings, the_mesh.getNodeName());
+                
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%06lu", (unsigned long)the_mesh.getBLEPin());
+                make_field_label(lst_settings, "BLE PIN");
+                make_field_value(lst_settings, buf);
+                
+                make_hint(lst_settings, "Long G0: Back");
                 break;
             }
             case SettingsCategory::RADIO_SETUP: {
-                lv_obj_t *label = lv_label_create(lst_settings);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Frequency: %.1f MHz\nSF: %d\nBW: %.1f kHz\nTX Power: %d dBm",
-                         LORA_FREQ, LORA_SF, LORA_BW, LORA_TX_POWER);
-                lv_label_set_text(label, buf);
+                make_section_title(lst_settings, "Radio Setup");
+                
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%.1f MHz", LORA_FREQ);
+                make_field_label(lst_settings, "Frequency");
+                make_field_value(lst_settings, buf);
+                
+                snprintf(buf, sizeof(buf), "SF%d", LORA_SF);
+                make_field_label(lst_settings, "Spreading Factor");
+                make_field_value(lst_settings, buf);
+                
+                snprintf(buf, sizeof(buf), "%.1f kHz", LORA_BW);
+                make_field_label(lst_settings, "Bandwidth");
+                make_field_value(lst_settings, buf);
+                
+                snprintf(buf, sizeof(buf), "%d dBm", LORA_TX_POWER);
+                make_field_label(lst_settings, "TX Power");
+                make_field_value(lst_settings, buf);
+                
+                make_hint(lst_settings, "Long G0: Back");
                 break;
             }
             case SettingsCategory::THEME: {
-                lv_obj_t *label = lv_label_create(lst_settings);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Screen Timeout: %s", _timeout_labels[_timeout_selected_idx]);
-                lv_label_set_text(label, buf);
+                make_section_title(lst_settings, "Theme");
+                
+                make_field_label(lst_settings, "Backlight");
+                make_field_value(lst_settings, "5%");
+                
+                make_field_label(lst_settings, "Main Color");
+                lv_obj_t *color_val = lv_label_create(lst_settings);
+                lv_obj_set_style_text_font(color_val, &lv_font_montserrat_16, 0);
+                lv_obj_set_style_text_color(color_val, lv_color_hex(0x0000FF), 0);
+                lv_label_set_text(color_val, "BLUE");
+                lv_obj_set_style_pad_bottom(color_val, 4, 0);
+                
+                make_field_label(lst_settings, "Screen Timeout");
+                make_field_value(lst_settings, _timeout_labels[_timeout_selected_idx]);
+                
+                make_hint(lst_settings, "G0:Change  Long:Back");
                 break;
             }
             case SettingsCategory::OTHER: {
-                lv_obj_t *label = lv_label_create(lst_settings);
+                make_section_title(lst_settings, "Other");
+                
                 uint32_t now_secs = rtc_clock.getCurrentTime();
                 int h = (now_secs / 3600) % 24;
                 int m = (now_secs % 3600) / 60;
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Time: %02d:%02d\nFactory Reset: Hold to reset", h, m);
-                lv_label_set_text(label, buf);
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+                make_field_label(lst_settings, "Set Time");
+                make_field_value(lst_settings, buf);
+                
+                make_field_label(lst_settings, "Battery");
+                make_field_value(lst_settings, "OK");
+                
+                lv_obj_t *reset_label = lv_label_create(lst_settings);
+                lv_label_set_text(reset_label, "Factory Reset");
+                lv_obj_set_style_text_color(reset_label, lv_color_hex(0x888888), 0);
+                lv_obj_set_style_pad_top(reset_label, 4, 0);
+                
+                lv_obj_t *reset_val = lv_label_create(lst_settings);
+                lv_obj_set_style_text_font(reset_val, &lv_font_montserrat_16, 0);
+                lv_obj_set_style_text_color(reset_val, lv_color_hex(0xFF0000), 0);
+                lv_label_set_text(reset_val, "Hold to reset");
+                lv_obj_set_style_pad_bottom(reset_val, 4, 0);
+                
+                make_hint(lst_settings, "G0:Set Time  Long:Back");
                 break;
             }
             case SettingsCategory::DEVICE_INFO: {
-                lv_obj_t *label = lv_label_create(lst_settings);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "Node: %s\nRadio: SX1268 %.1f MHz\nUptime: %ldmin",
-                         the_mesh.getNodeName(), LORA_FREQ, rtc_clock.getCurrentTime() / 60);
-                lv_label_set_text(label, buf);
+                make_section_title(lst_settings, "Device Info");
+                
+                make_field_label(lst_settings, "Node Name");
+                make_field_value(lst_settings, the_mesh.getNodeName());
+                
+                make_field_label(lst_settings, "Firmware");
+                make_field_value(lst_settings, "v1.0");
+                
+                char buf[32];
+                snprintf(buf, sizeof(buf), "SX1268 %.1f MHz", LORA_FREQ);
+                make_field_label(lst_settings, "Radio");
+                make_field_value(lst_settings, buf);
+                
+                snprintf(buf, sizeof(buf), "%ldmin", rtc_clock.getCurrentTime() / 60);
+                make_field_label(lst_settings, "Uptime");
+                make_field_value(lst_settings, buf);
+                
+                make_hint(lst_settings, "Long G0: Back");
                 break;
             }
             default:
@@ -576,19 +883,49 @@ void create_ui() {
     
     // Home 页
     lv_obj_set_flex_flow(tab_home, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(tab_home, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(tab_home, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     
-    lbl_time = lv_label_create(tab_home);
-    lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_48, 0);
-    lv_label_set_text(lbl_time, "00:00");
+    // 顶部行：右侧显示电量
+    home_top_row = lv_obj_create(tab_home);
+    lv_obj_set_size(home_top_row, lv_pct(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(home_top_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(home_top_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(home_top_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(home_top_row, 0, 0);
+    lv_obj_set_style_pad_top(home_top_row, 5, 0);
+    lv_obj_set_style_pad_bottom(home_top_row, 5, 0);
+    lv_obj_set_style_pad_left(home_top_row, 5, 0);
+    lv_obj_set_style_pad_right(home_top_row, 15, 0);
+    lv_obj_set_style_pad_column(home_top_row, 5, 0);
+    
+    lbl_batt = lv_label_create(home_top_row);
+    lv_obj_set_style_text_font(lbl_batt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_batt, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(lbl_batt, "100");
+    
+    lbl_batt_icon = lv_label_create(home_top_row);
+    lv_obj_set_style_text_font(lbl_batt_icon, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_batt_icon, lv_color_hex(0x00B050), 0);
+    lv_label_set_text(lbl_batt_icon, LV_SYMBOL_BATTERY_FULL);
+    
+    // spacer
+    lv_obj_t *spacer = lv_obj_create(tab_home);
+    lv_obj_set_size(spacer, lv_pct(100), 50);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spacer, 0, 0);
+    lv_obj_set_style_pad_all(spacer, 0, 0);
+    
+    // 创建点阵时钟容器
+    clock_container = lv_obj_create(tab_home);
+    lv_obj_set_size(clock_container, lv_pct(100), 100); // 7行 * 13像素 ≈ 91像素
+    lv_obj_set_style_bg_opa(clock_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(clock_container, 0, 0);
+    lv_obj_set_style_pad_all(clock_container, 0, 0);
+    create_matrix_clock(clock_container);
     
     lbl_date = lv_label_create(tab_home);
-    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_24, 0);
     lv_label_set_text(lbl_date, "2024-01-01");
-    
-    lbl_batt = lv_label_create(tab_home);
-    lv_obj_set_style_text_font(lbl_batt, &lv_font_montserrat_14, 0);
-    lv_label_set_text(lbl_batt, "Battery: 100%");
     
     // Contacts 页
     lv_obj_set_flex_flow(tab_contacts, LV_FLEX_FLOW_COLUMN);
@@ -597,7 +934,7 @@ void create_ui() {
     lv_label_set_text(hdr_contacts, "Contacts");
     lv_obj_set_style_text_font(hdr_contacts, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(hdr_contacts, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_color(hdr_contacts, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_color(hdr_contacts, lv_color_hex(0x333333), 0);
     lv_obj_set_style_bg_opa(hdr_contacts, LV_OPA_COVER, 0);
     lv_obj_set_width(hdr_contacts, lv_pct(100));
     lv_obj_set_style_pad_top(hdr_contacts, 5, 0);
@@ -617,6 +954,10 @@ void create_ui() {
     lv_obj_set_scrollbar_mode(lst_contacts, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_width(lst_contacts, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(lst_contacts, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_top(lst_contacts, 0, 0);
+    lv_obj_set_style_pad_bottom(lst_contacts, 5, 0);
+    lv_obj_set_style_pad_left(lst_contacts, 5, 0);
+    lv_obj_set_style_pad_right(lst_contacts, 5, 0);
     lv_obj_set_style_pad_row(lst_contacts, 5, 0);
     
     // Channels 页
@@ -626,7 +967,7 @@ void create_ui() {
     lv_label_set_text(hdr_channels, "Channels");
     lv_obj_set_style_text_font(hdr_channels, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(hdr_channels, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_color(hdr_channels, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_color(hdr_channels, lv_color_hex(0x333333), 0);
     lv_obj_set_style_bg_opa(hdr_channels, LV_OPA_COVER, 0);
     lv_obj_set_width(hdr_channels, lv_pct(100));
     lv_obj_set_style_pad_top(hdr_channels, 5, 0);
@@ -643,6 +984,10 @@ void create_ui() {
     lv_obj_set_scrollbar_mode(lst_channels, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_width(lst_channels, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(lst_channels, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_top(lst_channels, 0, 0);
+    lv_obj_set_style_pad_bottom(lst_channels, 5, 0);
+    lv_obj_set_style_pad_left(lst_channels, 5, 0);
+    lv_obj_set_style_pad_right(lst_channels, 5, 0);
     lv_obj_set_style_pad_row(lst_channels, 5, 0);
     
     // Settings 页
@@ -652,7 +997,7 @@ void create_ui() {
     lv_label_set_text(hdr_settings, "Settings");
     lv_obj_set_style_text_font(hdr_settings, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(hdr_settings, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_color(hdr_settings, lv_color_hex(0x00B050), 0);
+    lv_obj_set_style_bg_color(hdr_settings, lv_color_hex(0x333333), 0);
     lv_obj_set_style_bg_opa(hdr_settings, LV_OPA_COVER, 0);
     lv_obj_set_width(hdr_settings, lv_pct(100));
     lv_obj_set_style_pad_top(hdr_settings, 5, 0);
@@ -669,6 +1014,10 @@ void create_ui() {
     lv_obj_set_scrollbar_mode(lst_settings, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_width(lst_settings, 0, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(lst_settings, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_top(lst_settings, 0, 0);
+    lv_obj_set_style_pad_bottom(lst_settings, 5, 0);
+    lv_obj_set_style_pad_left(lst_settings, 5, 0);
+    lv_obj_set_style_pad_right(lst_settings, 5, 0);
     lv_obj_set_style_pad_row(lst_settings, 5, 0);
     
     // 更新列表
@@ -860,6 +1209,7 @@ void loop() {
                 _time_edit_minute = (_time_edit_minute + 59) % 60;
             }
         }
+        update_settings_list();
         return;
     }
 
@@ -869,8 +1219,15 @@ void loop() {
         return;
     }
 
-    // G45短按始终切换到下一个tab
+    // 在Settings详情页时，G45滚动页面
     uint16_t current_tab = lv_tabview_get_tab_act(tabview);
+    if (current_tab == 3 && _settings_selected) {
+        // 滚动lst_settings列表
+        lv_obj_scroll_by(lst_settings, 0, -30, LV_ANIM_ON);
+        return;
+    }
+
+    // G45短按始终切换到下一个tab
     if (current_tab < 3) {
         lv_tabview_set_act(tabview, current_tab + 1, LV_ANIM_OFF);
     } else {
@@ -896,6 +1253,7 @@ void loop() {
         _in_time_set = false;
         _time_editing = false;
         Serial.printf("[UI] G0 long: Time set to %02d:%02d (epoch=%lu)\n", _time_edit_hour, _time_edit_minute, new_secs);
+        update_settings_list();
         return;
     }
 
@@ -920,11 +1278,24 @@ void loop() {
     if (current_tab == 3) { // Settings tab
         if (_settings_selected) { // 已在子菜单，返回主菜单
             _settings_selected = false;
+            _in_timeout_select = false;
+            _in_time_set = false;
+            _time_editing = false;
             update_settings_list();
             return;
         }
         // 主菜单，进入子菜单
         _settings_selected = true;
+        switch (_settings_menu_idx) {
+            case 0: _settings_category = SettingsCategory::PUBLIC_INFO; break;
+            case 1: _settings_category = SettingsCategory::RADIO_SETUP; break;
+            case 2: _settings_category = SettingsCategory::THEME; break;
+            case 3: _settings_category = SettingsCategory::OTHER; break;
+            case 4: _settings_category = SettingsCategory::DEVICE_INFO; break;
+        }
+        _in_timeout_select = false;
+        _in_time_set = false;
+        _time_editing = false;
         update_settings_list();
     } else if (current_tab == 1) { // Contacts tab - 进入联系人Chat
         int num_contacts = the_mesh.getNumContacts();
@@ -959,6 +1330,7 @@ void loop() {
                 _time_edit_minute = (_time_edit_minute + 1) % 60;
             }
         }
+        update_settings_list();
         return;
     }
 
@@ -974,6 +1346,19 @@ void loop() {
         if (!_settings_selected) {
             _settings_menu_idx = (_settings_menu_idx + 1) % 5;
             update_settings_list();
+        } else {
+            if (_settings_category == SettingsCategory::THEME) {
+                _in_timeout_select = true;
+                update_settings_list();
+            } else if (_settings_category == SettingsCategory::OTHER) {
+                _in_time_set = true;
+                _time_edit_field = 0;
+                _time_editing = false;
+                uint32_t now_secs = rtc_clock.getCurrentTime();
+                _time_edit_hour = (now_secs / 3600) % 24;
+                _time_edit_minute = (now_secs % 3600) / 60;
+                update_settings_list();
+            }
         }
     } else if (current_tab == 0) { // Home tab - 无操作或跳转
     } else if (current_tab == 1) { // Contacts tab - 切换联系人选中项
