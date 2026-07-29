@@ -224,8 +224,8 @@ bool ESPWatchTFTDisplay::begin() {
     // Full LCD init - this will light the backlight and send SPI init commands
     LCD_Init();
 
-    // Draw a visible test pattern to prove the display is working
-    drawTestPattern();
+    // Fill screen with black instead of test pattern
+    LCD_Fill_hv(0, 0, 239, 284, 0x0000);
 
     _isOn = true;
     _needsReinit = false;  // LCD_Init already did full initialization

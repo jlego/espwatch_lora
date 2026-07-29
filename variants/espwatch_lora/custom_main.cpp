@@ -540,15 +540,15 @@ void update_time_display(lv_timer_t *timer) {
     
     // 更新电池图标
     const char* batt_icon;
-    if (batt >= 80) batt_icon = LV_SYMBOL_BATTERY_FULL;
-    else if (batt >= 60) batt_icon = LV_SYMBOL_BATTERY_3;
-    else if (batt >= 40) batt_icon = LV_SYMBOL_BATTERY_2;
-    else if (batt >= 20) batt_icon = LV_SYMBOL_BATTERY_1;
+    if (batt > 80) batt_icon = LV_SYMBOL_BATTERY_FULL;
+    else if (batt > 60) batt_icon = LV_SYMBOL_BATTERY_3;
+    else if (batt > 40) batt_icon = LV_SYMBOL_BATTERY_2;
+    else if (batt > 20) batt_icon = LV_SYMBOL_BATTERY_1;
     else batt_icon = LV_SYMBOL_BATTERY_EMPTY;
     lv_label_set_text(lbl_batt_icon, batt_icon);
     
     // 电量低于20%时图标变为红色，否则为绿色
-    if (batt < 20) {
+    if (batt <= 20) {
         lv_obj_set_style_text_color(lbl_batt_icon, lv_color_hex(0xFF0000), 0);
     } else {
         lv_obj_set_style_text_color(lbl_batt_icon, lv_color_hex(0x00B050), 0);

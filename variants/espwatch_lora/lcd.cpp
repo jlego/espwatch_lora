@@ -255,9 +255,9 @@ void LCD_Init(void) {
     LCD_set_direction(USE_HORIZONTAL);
     LCD_BacklightInit();
 
-    // 填充白色确认显示工作
-    LCD_Clear(0xFFFF);
-    Serial.println("[LCD] Init complete - screen filled WHITE");
+    // 填充黑色确认显示工作
+    LCD_Clear(0x0000);
+    Serial.println("[LCD] Init complete - screen filled BLACK");
 }
 
 void LCD_SetWindows(u16 xStar, u16 yStar, u16 xEnd, u16 yEnd) {
