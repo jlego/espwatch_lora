@@ -59,20 +59,32 @@ public:
     
     void msgRead(int msgcount) override {}
     void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override {
+        Serial.printf("[RX] newMsg: from=%s, text=%s, path_len=%d\n", from_name, text, path_len);
         _new_message = true;
         // Store in chat history - received message
-        // Determine if it's a channel or direct message based on path_len
-        bool is_channel = (path_len > 0);
+        // path_len=255 means direct message (not flood), path_len<=32 means channel/flood
+        bool is_channel = (path_len > 0 && path_len != 255);
         const char* target = is_channel ? "Broadcast" : from_name;
+        Serial.printf("[RX] is_channel=%d, target=%s, _chat_visible=%d\n", is_channel, target, _chat_visible);
         add_chat_message(from_name, text, false, is_channel, target);
         
         // If chat overlay is visible for this conversation, refresh it
         if (_chat_visible) {
+            Serial.println("[RX] Calling update_chat_list()");
             update_chat_list();
         }
     }
     void onDiscoveredContact(ContactInfo& ci, bool is_new, uint8_t path_len, const uint8_t* path) {
         _new_message = true;
+    }
+    void onMessageSent(const char* to_name, const char* text, bool is_channel) override {
+        Serial.printf("[TX] messageSent: to=%s, text=%s, is_channel=%d\n", to_name, text, is_channel);
+        add_chat_message(to_name, text, true, is_channel, is_channel ? "Broadcast" : to_name);
+        
+        // If chat overlay is visible for this conversation, refresh it
+        if (_chat_visible) {
+            update_chat_list();
+        }
     }
     void notify(UIEventType t = UIEventType::none) override {}
     void loop() override {}
@@ -495,7 +507,7 @@ void init_lvgl() {
 
 // 更新时间显示
 void update_time_display(lv_timer_t *timer) {
-    uint32_t now_secs = rtc_clock.getCurrentTime();
+    uint32_t now_secs = rtc_clock.getCurrentTime() + 8 * 3600;  // UTC+8
     int h = (now_secs / 3600) % 24;
     int m = (now_secs % 3600) / 60;
     
@@ -768,7 +780,7 @@ void update_settings_list() {
             case SettingsCategory::OTHER: {
                 make_section_title(lst_settings, "Other");
                 
-                uint32_t now_secs = rtc_clock.getCurrentTime();
+                uint32_t now_secs = rtc_clock.getCurrentTime() + 8 * 3600;  // UTC+8
                 int h = (now_secs / 3600) % 24;
                 int m = (now_secs % 3600) / 60;
                 char buf[32];
@@ -850,6 +862,9 @@ void show_chat_overlay(const char* title) {
         lv_obj_set_scrollbar_mode(lst_chat_overlay, LV_SCROLLBAR_MODE_OFF);
         lv_obj_set_style_width(lst_chat_overlay, 0, LV_PART_SCROLLBAR);
         lv_obj_set_style_bg_opa(lst_chat_overlay, LV_OPA_TRANSP, LV_PART_SCROLLBAR);
+        lv_obj_set_flex_flow(lst_chat_overlay, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_flex_main_place(lst_chat_overlay, LV_FLEX_ALIGN_START, 0);
+        lv_obj_set_style_pad_row(lst_chat_overlay, 5, 0);
     }
     
     lv_label_set_text(lbl_chat_title_overlay, title);
@@ -1282,20 +1297,19 @@ void loop() {
 #ifdef CUSTOM_BOARD
   if (_screen_off) {
     the_mesh.loop();
-
-    pinMode(0, INPUT_PULLUP);
-    gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-    esp_sleep_enable_timer_wakeup(100000ULL);
-    esp_light_sleep_start();
     
+    // Check button
     if (digitalRead(0) == LOW) {
       _screen_off = false;
       _just_woken = true;
       _last_activity = millis();
       Serial.println("[UI] Screen wake by G0");
       display.turnOn();
+      return;
     }
+    
+    // Simple delay instead of light sleep to avoid wake/reboot issues
+    delay(100);
     return;
   }
 #endif
@@ -1399,16 +1413,16 @@ void loop() {
     user_btn.cancelClick();
 
     if (_in_time_set) {
-        uint32_t now_secs = rtc_clock.getCurrentTime();
+        uint32_t now_secs = rtc_clock.getCurrentTime() + 8 * 3600;  // UTC+8
         int cur_h = (now_secs / 3600) % 24;
         int cur_m = (now_secs % 3600) / 60;
         int cur_s = now_secs % 60;
-        int days = now_secs / 86400;
-        uint32_t new_secs = (uint32_t)days * 86400 + (uint32_t)_time_edit_hour * 3600 + (uint32_t)_time_edit_minute * 60 + cur_s;
-        rtc_clock.setCurrentTime(new_secs);
+        int days = (rtc_clock.getCurrentTime()) / 86400;  // UTC days
+        uint32_t new_secs_utc = (uint32_t)days * 86400 + (uint32_t)_time_edit_hour * 3600 + (uint32_t)_time_edit_minute * 60 + cur_s - 8 * 3600;
+        rtc_clock.setCurrentTime(new_secs_utc);
         _in_time_set = false;
         _time_editing = false;
-        Serial.printf("[UI] G0 long: Time set to %02d:%02d (epoch=%lu)\n", _time_edit_hour, _time_edit_minute, new_secs);
+        Serial.printf("[UI] G0 long: Time set to %02d:%02d (UTC epoch=%lu)\n", _time_edit_hour, _time_edit_minute, new_secs_utc);
         update_settings_list();
         return;
     }
@@ -1476,7 +1490,7 @@ void loop() {
     if (_in_time_set) {
         if (!_time_editing) {
             _time_editing = true;
-            uint32_t now_secs = rtc_clock.getCurrentTime();
+            uint32_t now_secs = rtc_clock.getCurrentTime() + 8 * 3600;  // UTC+8
             _time_edit_hour = (now_secs / 3600) % 24;
             _time_edit_minute = (now_secs % 3600) / 60;
         } else {
@@ -1510,7 +1524,7 @@ void loop() {
                 _in_time_set = true;
                 _time_edit_field = 0;
                 _time_editing = false;
-                uint32_t now_secs = rtc_clock.getCurrentTime();
+                uint32_t now_secs = rtc_clock.getCurrentTime() + 8 * 3600;  // UTC+8
                 _time_edit_hour = (now_secs / 3600) % 24;
                 _time_edit_minute = (now_secs % 3600) / 60;
                 update_settings_list();

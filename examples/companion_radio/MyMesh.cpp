@@ -293,6 +293,15 @@ void MyMesh::queueOutgoingMessageForBLE(const ContactInfo* contact, const Channe
   // Add to offline queue for BLE transmission
   addToOfflineQueue(frame, i);
   
+  // Notify UI to display the sent message locally
+  if (_ui) {
+    const char* target_name = contact ? contact->name : (channel ? channel->name : NULL);
+    bool is_ch = (channel != NULL);
+    if (target_name) {
+      _ui->onMessageSent(target_name, text, is_ch);
+    }
+  }
+  
   MESH_DEBUG_PRINTLN("Queued outgoing message for BLE sync: %d bytes", i);
 }
 
@@ -991,6 +1000,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           next_ack_idx = (next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
         }
 
+        // Push sent message to BLE queue for phone app sync
+        queueOutgoingMessageForBLE(recipient, NULL, _prefs.node_name, text, msg_timestamp);
+
         out_frame[0] = RESP_CODE_SENT;
         out_frame[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
         memcpy(&out_frame[2], &expected_ack, 4);
@@ -1017,6 +1029,8 @@ void MyMesh::handleCmdFrame(size_t len) {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
       if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+        // Push sent channel message to BLE queue for phone app sync
+        queueOutgoingMessageForBLE(NULL, &channel, _prefs.node_name, text, msg_timestamp);
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx

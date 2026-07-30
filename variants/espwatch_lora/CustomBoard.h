@@ -24,7 +24,13 @@ public:
   CustomBoard() {
     esp_reset_reason_t reason = esp_reset_reason();
     if (reason == ESP_RST_DEEPSLEEP) {
-      _startup_reason = BD_STARTUP_RX_PACKET;
+      _startup_reason = BD_STARTUP_NORMAL;
+      #if P_LORA_DIO_1 != -1
+        long wakeup_source = esp_sleep_get_ext1_wakeup_status();
+        if (wakeup_source & (1LL << P_LORA_DIO_1)) {
+          _startup_reason = BD_STARTUP_RX_PACKET;
+        }
+      #endif
     } else {
       _startup_reason = BD_STARTUP_NORMAL;
     }
@@ -38,9 +44,17 @@ public:
     Serial.printf("[CustomBoard] ESP32-S3 reset reason=%d\n", esp_reset_reason());
 
     // Initialize I2C bus for sensors - use standard 100kHz for reliability
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000);
+    // Check if already initialized to avoid "Bus already started" warning
+    static bool i2c_initialized = false;
+    if (!i2c_initialized) {
+      Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000);
+      i2c_initialized = true;
+    }
     Serial.printf("[CustomBoard] I2C: SDA=%d, SCL=%d @100kHz\n",
                   PIN_I2C_SDA, PIN_I2C_SCL);
+
+    // Initialize CW2015 fuel gauge
+    initCW2015();
 
     // Initialize buzzer pin - only drive LOW, no beeps at startup (prevents
     // triggering tone() on a pin that may not actually have a buzzer wired)
@@ -49,6 +63,71 @@ public:
     Serial.printf("[CustomBoard] Buzzer: pin=%d (PWM passive)\n", CUSTOM_BUZZER_PIN);
 
     Serial.println("[CustomBoard] Board init complete (conservative)");
+  }
+
+  /**
+   * Initialize CW2015 fuel gauge.
+   * CW2015 needs configuration registers to be set before it can measure voltage.
+   * This writes a basic config to enable voltage measurement.
+   */
+  void initCW2015() {
+    // Check if CW2015 is present
+    Wire.beginTransmission(CW2015_I2C_ADDR);
+    if (Wire.endTransmission() != 0) {
+      Serial.println("[CW2015] Not found on I2C bus");
+      return;
+    }
+
+    // Read VERSION register (0x00) to verify chip is responsive
+    Wire.beginTransmission(CW2015_I2C_ADDR);
+    Wire.write(0x00);
+    Wire.endTransmission(false);
+    if (Wire.requestFrom((uint8_t)CW2015_I2C_ADDR, (uint8_t)1) == 1) {
+      uint8_t version = Wire.read();
+      Serial.printf("[CW2015] Chip version: 0x%02X\n", version);
+    } else {
+      Serial.println("[CW2015] Failed to read version");
+      return;
+    }
+
+    // CW2015 needs battery model data written to CFG registers (0x0A-0x29)
+    // These 32 bytes define the battery voltage curve for SoC estimation
+    // Using generic LiPo 3.0V-4.2V model data
+    const uint8_t model_data[32] = {
+      0x40, 0x5E, 0x69, 0x6C, 0x6C, 0x6F, 0x71, 0x76,  // 0x0A-0x11
+      0x7E, 0x84, 0x88, 0x8C, 0x8F, 0x92, 0x95, 0x98,  // 0x12-0x19
+      0x9B, 0x9E, 0xA1, 0xA4, 0xA7, 0xAA, 0xAD, 0xB0,  // 0x1A-0x21
+      0xB3, 0xB6, 0xB9, 0xBC, 0xBF, 0xC2, 0xC5, 0xC8   // 0x22-0x29
+    };
+
+    // Write model data to CFG registers (0x0A-0x29)
+    Wire.beginTransmission(CW2015_I2C_ADDR);
+    Wire.write(0x0A);  // Start at CFG register
+    for (int i = 0; i < 32; i++) {
+      Wire.write(model_data[i]);
+    }
+    if (Wire.endTransmission() == 0) {
+      Serial.println("[CW2015] Model data written successfully");
+    } else {
+      Serial.println("[CW2015] Failed to write model data");
+      return;
+    }
+
+    // Wait for chip to process
+    delay(200);
+
+    // Read back VERSION to confirm
+    Wire.beginTransmission(CW2015_I2C_ADDR);
+    Wire.write(0x00);
+    Wire.endTransmission(false);
+    if (Wire.requestFrom((uint8_t)CW2015_I2C_ADDR, (uint8_t)1) == 1) {
+      uint8_t version = Wire.read();
+      Serial.printf("[CW2015] After init, version: 0x%02X\n", version);
+    }
+
+    // Verify by reading VCELL
+    uint16_t test_mv = getBattMilliVolts();
+    Serial.printf("[CW2015] Init complete, test voltage: %d mV\n", test_mv);
   }
 
   /**
@@ -82,10 +161,14 @@ public:
     Wire.beginTransmission(CW2015_I2C_ADDR);
     Wire.write(0x02);  // VCELL register start address
     if (Wire.endTransmission(false) != 0) {
+      static bool warned = false;
+      if (!warned) { Serial.println("[CW2015] endTransmission failed, using fallback 3300mV"); warned = true; }
       return 3300;  // fallback default
     }
 
     if (Wire.requestFrom((uint8_t)CW2015_I2C_ADDR, (uint8_t)2) != 2) {
+      static bool warned = false;
+      if (!warned) { Serial.println("[CW2015] requestFrom failed, using fallback 3300mV"); warned = true; }
       return 3300;
     }
 
@@ -99,6 +182,8 @@ public:
 
     // Sanity check: typical LiPo is 3000-4200 mV
     if (voltage_mv < 2500 || voltage_mv > 5000) {
+      static bool warned = false;
+      if (!warned) { Serial.printf("[CW2015] voltage out of range: %d mV (raw=%d), using fallback 3700mV\n", voltage_mv, raw); warned = true; }
       return 3700;  // sensible default for ~half charged
     }
     return (uint16_t)voltage_mv;
@@ -195,9 +280,17 @@ public:
   }
 
   void enterDeepSleep(uint32_t secs, int pin_wake_btn) {
-    if (pin_wake_btn >= 0) {
-      esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);
-    }
+    #if P_LORA_DIO_1 != -1
+      if (pin_wake_btn >= 0) {
+        esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn) | (1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
+      } else {
+        esp_sleep_enable_ext1_wakeup((1ULL << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
+      }
+    #else
+      if (pin_wake_btn >= 0) {
+        esp_sleep_enable_ext1_wakeup((1ULL << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);
+      }
+    #endif
     if (secs > 0) {
       esp_sleep_enable_timer_wakeup(secs * 1000000ULL);
     }
