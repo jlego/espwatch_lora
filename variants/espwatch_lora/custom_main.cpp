@@ -61,6 +61,8 @@ public:
     void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override {
         Serial.printf("[RX] newMsg: from=%s, text=%s, path_len=%d\n", from_name, text, path_len);
         _new_message = true;
+        // Beep to notify user
+        board.beep(100, 2000);
         // Store in chat history - received message
         // path_len=255 means direct message (not flood), path_len<=32 means channel/flood
         bool is_channel = (path_len > 0 && path_len != 255);
@@ -227,26 +229,44 @@ static void update_chat_list() {
     for (int i = 0; i < show_count; i++) {
         ChatMessage& msg = _chat_history[filtered_indices[i]];
         
-        // Container for each message
-        lv_obj_t* msg_container = lv_obj_create(lst_chat_overlay);
-        lv_obj_set_width(msg_container, lv_pct(90));
+        // Row wrapper for alignment
+        lv_obj_t* row = lv_obj_create(lst_chat_overlay);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        
+        // Spacer for outgoing messages
+        if (msg.is_outgoing) {
+            lv_obj_t* spacer = lv_obj_create(row);
+            lv_obj_set_flex_grow(spacer, 1);
+            lv_obj_set_height(spacer, 0);
+            lv_obj_set_style_border_width(spacer, 0, 0);
+            lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_pad_all(spacer, 0, 0);
+        }
+        
+        // Container for the message bubble
+        lv_obj_t* msg_container = lv_obj_create(row);
+        lv_obj_set_width(msg_container, lv_pct(80));
         lv_obj_set_height(msg_container, LV_SIZE_CONTENT);
         lv_obj_set_style_border_width(msg_container, 0, 0);
         lv_obj_set_style_pad_all(msg_container, 6, 0);
         lv_obj_set_style_radius(msg_container, 8, 0);
+        lv_obj_set_flex_flow(msg_container, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_flex_cross_place(msg_container, LV_FLEX_ALIGN_START, 0);
         
         if (msg.is_outgoing) {
-            // Sent message - green background, right aligned
+            // Sent message - green background
             lv_obj_set_style_bg_color(msg_container, lv_color_hex(0x00B050), 0);
             lv_obj_set_style_bg_opa(msg_container, LV_OPA_COVER, 0);
-            lv_obj_set_align(msg_container, LV_ALIGN_RIGHT_MID);
-            lv_obj_set_style_pad_bottom(msg_container, 4, 0);
         } else {
-            // Received message - blue background, left aligned
+            // Received message - blue background
             lv_obj_set_style_bg_color(msg_container, lv_color_hex(0x0096d8), 0);
             lv_obj_set_style_bg_opa(msg_container, LV_OPA_COVER, 0);
-            lv_obj_set_align(msg_container, LV_ALIGN_LEFT_MID);
-            lv_obj_set_style_pad_bottom(msg_container, 4, 0);
         }
         
         // Sender name (for received messages)
@@ -255,6 +275,7 @@ static void update_chat_list() {
             lv_label_set_text(name_label, msg.from_name);
             lv_obj_set_style_text_font(name_label, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(name_label, lv_color_hex(0xAADDFF), 0);
+            lv_obj_set_style_pad_bottom(name_label, 0, 0);
         }
         
         // Message text
@@ -263,6 +284,17 @@ static void update_chat_list() {
         lv_obj_set_style_text_font(text_label, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(text_label, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_width(text_label, lv_pct(100));
+        lv_label_set_long_mode(text_label, LV_LABEL_LONG_WRAP);
+        
+        // Spacer for received messages (pushes to left, so spacer on right)
+        if (!msg.is_outgoing) {
+            lv_obj_t* spacer = lv_obj_create(row);
+            lv_obj_set_flex_grow(spacer, 1);
+            lv_obj_set_height(spacer, 0);
+            lv_obj_set_style_border_width(spacer, 0, 0);
+            lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_pad_all(spacer, 0, 0);
+        }
     }
 }
 
