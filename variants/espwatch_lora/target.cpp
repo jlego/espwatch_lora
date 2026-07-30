@@ -29,107 +29,11 @@ ESP32RTCClock fallback_clock;
 AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 // ===========================================================================
-// CustomSensorManager (CUSTOM_BOARD mode): BMP280 + LIS2DH12
+// CustomSensorManager (CUSTOM_BOARD mode): LIS2DH12
 // ===========================================================================
 #ifdef CUSTOM_BOARD
 
 CustomSensorManager sensors;
-
-// --- BMP280 I2C helpers ---
-void CustomSensorManager::_bmp280_write_reg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(BMP280_I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  Wire.endTransmission();
-}
-
-void CustomSensorManager::_bmp280_read_regs(uint8_t reg, uint8_t *buf, uint8_t len) {
-  Wire.beginTransmission(BMP280_I2C_ADDR);
-  Wire.write(reg);
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)BMP280_I2C_ADDR, len);
-  for (uint8_t i = 0; i < len; i++) {
-    buf[i] = Wire.read();
-  }
-}
-
-bool CustomSensorManager::_bmp280_init() {
-  uint8_t chip_id = 0;
-  _bmp280_read_regs(0xD0, &chip_id, 1);
-  if (chip_id != 0x58 && chip_id != 0x56 && chip_id != 0x57) {
-    Serial.printf("[BMP280] Wrong chip ID: 0x%02X (expected 0x56/0x57/0x58)\n", chip_id);
-    return false;
-  }
-  Serial.printf("[BMP280] Chip ID: 0x%02X OK\n", chip_id);
-
-  // Soft reset
-  _bmp280_write_reg(0xE0, 0xB6);
-  delay(100);
-
-  // Read calibration data (registers 0x88 .. 0x9F, 24 bytes)
-  uint8_t cal[24];
-  _bmp280_read_regs(0x88, cal, 24);
-
-  _bmp_dig_T1 = (uint16_t)((cal[1] << 8) | cal[0]);
-  _bmp_dig_T2 = (int16_t)((cal[3] << 8) | cal[2]);
-  _bmp_dig_T3 = (int16_t)((cal[5] << 8) | cal[4]);
-
-  _bmp_dig_P1 = (uint16_t)((cal[7] << 8) | cal[6]);
-  _bmp_dig_P2 = (int16_t)((cal[9] << 8) | cal[8]);
-  _bmp_dig_P3 = (int16_t)((cal[11] << 8) | cal[10]);
-  _bmp_dig_P4 = (int16_t)((cal[13] << 8) | cal[12]);
-  _bmp_dig_P5 = (int16_t)((cal[15] << 8) | cal[14]);
-  _bmp_dig_P6 = (int16_t)((cal[17] << 8) | cal[16]);
-  _bmp_dig_P7 = (int16_t)((cal[19] << 8) | cal[18]);
-  _bmp_dig_P8 = (int16_t)((cal[21] << 8) | cal[20]);
-  _bmp_dig_P9 = (int16_t)((cal[23] << 8) | cal[22]);
-
-  // Configure: normal mode, 16x oversampling temp, 16x oversampling pressure
-  // ctrl_meas (0xF4): osrs_t[2:0] = 101 (x16), osrs_p[2:0] = 101 (x16), mode[1:0] = 11 (normal)
-  _bmp280_write_reg(0xF4, 0b10110111);
-
-  // config (0xF5): t_sb=101 (1000ms standby), filter=100 (x16), spi3w_en=0
-  _bmp280_write_reg(0xF5, 0b10110000);
-
-  delay(100);
-  Serial.println("[BMP280] Initialized (normal mode, x16 oversampling)");
-  return true;
-}
-
-void CustomSensorManager::_bmp280_read() {
-  uint8_t raw[6];
-  _bmp280_read_regs(0xF7, raw, 6);
-
-  int32_t adc_P = ((int32_t)raw[0] << 12) | ((int32_t)raw[1] << 4) | (raw[2] >> 4);
-  int32_t adc_T = ((int32_t)raw[3] << 12) | ((int32_t)raw[4] << 4) | (raw[5] >> 4);
-
-  // BMP280 compensation formulas
-  int32_t var1 = ((((adc_T >> 3) - ((int32_t)_bmp_dig_T1 << 1))) * ((int32_t)_bmp_dig_T2)) >> 11;
-  int32_t var2 = (((((adc_T >> 4) - ((int32_t)_bmp_dig_T1)) * ((adc_T >> 4) - ((int32_t)_bmp_dig_T1))) >> 12) * ((int32_t)_bmp_dig_T3)) >> 14;
-  int32_t t_fine = var1 + var2;
-
-  float T = (t_fine * 5 + 128) / 256.0f / 100.0f;  // deg C
-  _temperature = T;
-
-  // Pressure compensation
-  int64_t p_var1 = ((int64_t)t_fine) - 128000;
-  int64_t p_var2 = p_var1 * p_var1 * (int64_t)_bmp_dig_P6;
-  p_var2 = p_var2 + ((p_var1 * (int64_t)_bmp_dig_P5) << 17);
-  p_var2 = p_var2 + (((int64_t)_bmp_dig_P4) << 35);
-  p_var1 = ((p_var1 * p_var1 * (int64_t)_bmp_dig_P3) >> 8) + ((p_var1 * (int64_t)_bmp_dig_P2) << 12);
-  p_var1 = (((((int64_t)1) << 47) + p_var1)) * ((int64_t)_bmp_dig_P1) >> 33;
-
-  if (p_var1 == 0) {
-    return;
-  }
-  int64_t p = 1048576 - adc_P;
-  p = (((p << 31) - p_var2) * 3125) / p_var1;
-  p_var1 = (((int64_t)_bmp_dig_P9) * (p >> 13) * (p >> 13)) >> 25;
-  p_var2 = (((int64_t)_bmp_dig_P8) * p) >> 19;
-  p = ((p + p_var1 + p_var2) >> 8) + (((int64_t)_bmp_dig_P7) << 4);
-
-  _pressure = (float)p / 256.0f / 100.0f;  // hPa (mbar)
-}
 
 // --- LIS2DH12 I2C helpers ---
 void CustomSensorManager::_lis2dh_write_reg(uint8_t reg, uint8_t val) {
@@ -186,15 +90,12 @@ void CustomSensorManager::_lis2dh_read() {
 
 // --- Public API ---
 bool CustomSensorManager::begin() {
-  Serial.println("[Sensors] CustomSensorManager::begin() - starting BMP280 + LIS2DH12");
+  Serial.println("[Sensors] CustomSensorManager::begin() - starting LIS2DH12");
 
-  _bmp280_ok = _bmp280_init();
   _lis2dh_ok = _lis2dh_init();
 
-  if (_bmp280_ok || _lis2dh_ok) {
-    Serial.printf("[Sensors] Active: BMP280=%s, LIS2DH12=%s\n",
-                  _bmp280_ok ? "YES" : "NO",
-                  _lis2dh_ok ? "YES" : "NO");
+  if (_lis2dh_ok) {
+    Serial.println("[Sensors] Active: LIS2DH12=YES");
     // Do initial read
     loop();
     return true;
@@ -204,30 +105,17 @@ bool CustomSensorManager::begin() {
 }
 
 float CustomSensorManager::getAltitudeMeters() const {
-  // Barometric altitude formula: h = 44330 * (1 - (P/P0)^(1/5.255))
-  float p0 = 1013.25f;  // reference pressure at sea level (hPa)
-  float ratio = _pressure / p0;
-  return 44330.0f * (1.0f - powf(ratio, 1.0f / 5.255f));
+  return 0.0f;
 }
 
 bool CustomSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
-  if (_bmp280_ok) {
-    telemetry.addTemperature(1, _temperature);
-    telemetry.addBarometricPressure(2, _pressure);
-    if (requester_permissions & TELEM_PERM_LOCATION) {
-      telemetry.addAnalogInput(3, getAltitudeMeters());
-    }
-  }
   if (_lis2dh_ok) {
-    telemetry.addAccelerometer(4, _accel_x, _accel_y, _accel_z);
+    telemetry.addAccelerometer(1, _accel_x, _accel_y, _accel_z);
   }
   return true;
 }
 
 void CustomSensorManager::loop() {
-  if (_bmp280_ok) {
-    _bmp280_read();
-  }
   if (_lis2dh_ok) {
     _lis2dh_read();
   }

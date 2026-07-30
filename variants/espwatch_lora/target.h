@@ -25,29 +25,14 @@
 
 #ifdef CUSTOM_BOARD
 /**
- * CustomSensorManager - manages BMP280 (temp/pressure) and LIS2DH12 (accel)
+ * CustomSensorManager - manages LIS2DH12 (accel)
  * Uses direct I2C register access - no external library needed.
  */
 class CustomSensorManager : public SensorManager {
-  bool _bmp280_ok = false;
   bool _lis2dh_ok = false;
 
   // Cached values
-  float _temperature = 25.0f;
-  float _pressure = 1013.25f;
   float _accel_x = 0.0f, _accel_y = 0.0f, _accel_z = 1.0f;
-
-  // BMP280 calibration data
-  uint16_t _bmp_dig_T1;
-  int16_t  _bmp_dig_T2, _bmp_dig_T3;
-  uint16_t _bmp_dig_P1;
-  int16_t  _bmp_dig_P2, _bmp_dig_P3, _bmp_dig_P4, _bmp_dig_P5,
-           _bmp_dig_P6, _bmp_dig_P7, _bmp_dig_P8, _bmp_dig_P9;
-
-  void _bmp280_read_regs(uint8_t reg, uint8_t *buf, uint8_t len);
-  void _bmp280_write_reg(uint8_t reg, uint8_t val);
-  bool _bmp280_init();
-  void _bmp280_read();
 
   void _lis2dh_write_reg(uint8_t reg, uint8_t val);
   void _lis2dh_read_regs(uint8_t reg, uint8_t *buf, uint8_t len);
