@@ -157,6 +157,18 @@ static ChatMessage _chat_history[MAX_CHAT_MESSAGES];
 static int _chat_history_count = 0;
 
 static void add_chat_message(const char* from_name, const char* text, bool is_outgoing, bool is_channel, const char* target) {
+    // Skip duplicate: check last message
+    if (_chat_history_count > 0) {
+        const ChatMessage& last = _chat_history[_chat_history_count - 1];
+        if (last.is_outgoing == is_outgoing &&
+            last.is_channel == is_channel &&
+            strcmp(last.from_name, from_name) == 0 &&
+            strcmp(last.contact_or_channel, target) == 0 &&
+            strcmp(last.text, text) == 0) {
+            return;  // Duplicate, skip
+        }
+    }
+
     if (_chat_history_count >= MAX_CHAT_MESSAGES) {
         // Shift all messages up to make room
         for (int i = 0; i < MAX_CHAT_MESSAGES - 1; i++) {
