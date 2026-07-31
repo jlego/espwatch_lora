@@ -4,6 +4,7 @@
 #include "target.h"
 #include "lcd.h"
 #include <lvgl.h>
+#include "esp_task_wdt.h"
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
@@ -21,6 +22,12 @@ static const int _timeout_options_count = sizeof(_timeout_options) / sizeof(_tim
 static const char* _timeout_labels[] = {"Never", "10s", "30s", "1m", "2m", "5m"};
 static int _timeout_selected_idx = 1;
 static bool _in_timeout_select = false;
+
+// 电源管理状态
+static unsigned long _last_sensor_read = 0;
+static const unsigned long SENSOR_READ_INTERVAL_MS = 2000;
+static bool _pending_wakeup = false;
+static bool _msg_pending = false;
 
 // 时间设置状态
 static bool _in_time_set = false;
@@ -1266,6 +1273,15 @@ void draw_startup_screen() {
 void setup() {
   Serial.begin(115200);
 
+  setCpuFrequencyMhz(80);
+  Serial.printf("[POWER] CPU frequency set to 80MHz\n");
+
+  esp_task_wdt_delete(NULL);
+  esp_task_wdt_deinit();
+  esp_task_wdt_init(15000, true);
+  esp_task_wdt_add(NULL);
+  Serial.println("[POWER] Task WDT reconfigured: 15s timeout");
+
   board.begin();
 
 #ifdef CUSTOM_BOARD
@@ -1328,20 +1344,47 @@ void setup() {
 void loop() {
 #ifdef CUSTOM_BOARD
   if (_screen_off) {
-    the_mesh.loop();
+    if (_msg_pending) {
+      _msg_pending = false;
+      the_mesh.loop();
+      _new_message = false;
+      next_refresh = 0;
+      Serial.println("[POWER] Message received while screen off");
+      return;
+    }
     
-    // Check button
-    if (digitalRead(0) == LOW) {
+    if (_pending_wakeup) {
+      _pending_wakeup = false;
       _screen_off = false;
-      _just_woken = true;
+      _just_woken = false;
       _last_activity = millis();
-      Serial.println("[UI] Screen wake by G0");
+      Serial.println("[UI] Screen wake by button");
       display.turnOn();
       return;
     }
     
-    // Simple delay instead of light sleep to avoid wake/reboot issues
-    delay(100);
+    gpio_pullup_en(GPIO_NUM_0);
+    gpio_pulldown_dis(GPIO_NUM_0);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    esp_sleep_enable_ext1_wakeup((1ULL << 5), ESP_EXT1_WAKEUP_ANY_HIGH);
+    esp_sleep_enable_timer_wakeup(100000);
+    
+    if (digitalRead(5) == HIGH) {
+      _msg_pending = true;
+      return;
+    }
+    
+    delay(1);
+    esp_light_sleep_start();
+    
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    if (wakeup_cause == ESP_SLEEP_WAKEUP_EXT1) {
+      _msg_pending = true;
+    } else {
+      if (digitalRead(0) == LOW) {
+        _pending_wakeup = true;
+      }
+    }
     return;
   }
 #endif
@@ -1364,9 +1407,11 @@ void loop() {
 #ifdef CUSTOM_BOARD
   unsigned long now = millis();
 
-  if (now - _last_activity >= get_screen_timeout_ms() && get_screen_timeout_ms() > 0 && !_screen_off) {
+  uint16_t current_tab = lv_tabview_get_tab_act(tabview);
+  if (current_tab == 0 && now - _last_activity >= get_screen_timeout_ms() && get_screen_timeout_ms() > 0 && !_screen_off) {
     display.turnOff();
     _screen_off = true;
+    _pending_wakeup = false;
     Serial.println("[UI] Screen timeout -> off");
     return;
   }
@@ -1375,10 +1420,11 @@ void loop() {
   int btn_g45 = user_btn2.check();
 
   if (_screen_off && (btn_g0 != BUTTON_EVENT_NONE || btn_g45 != BUTTON_EVENT_NONE)) {
-    display.turnOn();
+    _pending_wakeup = false;
     _screen_off = false;
     _last_activity = now;
     _just_woken = true;
+    display.turnOn();
     Serial.println("[UI] Screen wake up");
     next_refresh = now + 60000;
     return;

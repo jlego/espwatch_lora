@@ -25,32 +25,20 @@
 
 #ifdef CUSTOM_BOARD
 /**
- * CustomSensorManager - manages LIS2DH12 (accel)
- * Uses direct I2C register access - no external library needed.
+ * CustomSensorManager - no sensors (BMP280 and LIS2DH12 disabled for power saving)
  */
 class CustomSensorManager : public SensorManager {
-  bool _lis2dh_ok = false;
-
-  // Cached values
-  float _accel_x = 0.0f, _accel_y = 0.0f, _accel_z = 1.0f;
-
-  void _lis2dh_write_reg(uint8_t reg, uint8_t val);
-  void _lis2dh_read_regs(uint8_t reg, uint8_t *buf, uint8_t len);
-  bool _lis2dh_init();
-  void _lis2dh_read();
-
 public:
   bool begin() override;
   bool querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) override;
   void loop() override;
 
-  // Direct accessors
-  float getTemperature() const { return _temperature; }
-  float getPressure() const { return _pressure; }
-  float getAltitudeMeters() const;
-  float getAccelX() const { return _accel_x; }
-  float getAccelY() const { return _accel_y; }
-  float getAccelZ() const { return _accel_z; }
+  float getTemperature() const { return 25.0f; }
+  float getPressure() const { return 1013.25f; }
+  float getAltitudeMeters() const { return 0.0f; }
+  float getAccelX() const { return 0.0f; }
+  float getAccelY() const { return 0.0f; }
+  float getAccelZ() const { return 1.0f; }
 };
 #else  // CUSTOM_BOARD not defined -> fallback to CardputerSensorManager
 #ifdef HAS_GPS

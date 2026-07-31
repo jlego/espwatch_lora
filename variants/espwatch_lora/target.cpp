@@ -2,6 +2,9 @@
 #include <Wire.h>
 #include "target.h"
 
+#define STRINGIFY_HELPER(x) #x
+#define STRINGIFY(x) STRINGIFY_HELPER(x)
+
 BoardType board;
 
 static SPIClass spi(FSPI);  // LoRa 独占 FSPI (SPI2_HOST)，与 LCD 的 HSPI (SPI3_HOST) 完全独立
@@ -29,96 +32,22 @@ ESP32RTCClock fallback_clock;
 AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 // ===========================================================================
-// CustomSensorManager (CUSTOM_BOARD mode): LIS2DH12
+// CustomSensorManager (CUSTOM_BOARD mode): no sensors
 // ===========================================================================
 #ifdef CUSTOM_BOARD
 
 CustomSensorManager sensors;
 
-// --- LIS2DH12 I2C helpers ---
-void CustomSensorManager::_lis2dh_write_reg(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(LIS2DH12_I2C_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  Wire.endTransmission();
-}
-
-void CustomSensorManager::_lis2dh_read_regs(uint8_t reg, uint8_t *buf, uint8_t len) {
-  Wire.beginTransmission(LIS2DH12_I2C_ADDR);
-  Wire.write(reg | 0x80);  // auto-increment bit
-  Wire.endTransmission(false);
-  Wire.requestFrom((uint8_t)LIS2DH12_I2C_ADDR, len);
-  for (uint8_t i = 0; i < len; i++) {
-    buf[i] = Wire.read();
-  }
-}
-
-bool CustomSensorManager::_lis2dh_init() {
-  uint8_t chip_id = 0;
-  _lis2dh_read_regs(0x0F, &chip_id, 1);
-  if (chip_id != 0x33) {
-    Serial.printf("[LIS2DH12] Wrong chip ID: 0x%02X (expected 0x33)\n", chip_id);
-    return false;
-  }
-  Serial.printf("[LIS2DH12] Chip ID: 0x%02X OK\n", chip_id);
-
-  // CTRL_REG1 (0x20): ODR=10Hz (0010), LPen=0 (normal mode), XYZ enabled
-  _lis2dh_write_reg(0x20, 0b00010111);
-
-  // CTRL_REG4 (0x23): BDU=1, BLE=0 (little endian), FS=+/-2g (00), HR=1 (high-res)
-  _lis2dh_write_reg(0x23, 0b10001000);
-
-  delay(100);
-  Serial.println("[LIS2DH12] Initialized (+/-2g, 10Hz, high-res)");
+bool CustomSensorManager::begin() {
+  Serial.println("[Sensors] No sensors active (BMP280 and LIS2DH12 disabled)");
   return true;
 }
 
-void CustomSensorManager::_lis2dh_read() {
-  uint8_t raw[6];
-  _lis2dh_read_regs(0x28, raw, 6);
-
-  int16_t x = (int16_t)((raw[1] << 8) | raw[0]);
-  int16_t y = (int16_t)((raw[3] << 8) | raw[2]);
-  int16_t z = (int16_t)((raw[5] << 8) | raw[4]);
-
-  // In high-res mode, 12-bit values. Sensitivity = 1mg/LSB for +/-2g
-  // => 1 LSB = 0.001 g
-  _accel_x = x * 0.001f;
-  _accel_y = y * 0.001f;
-  _accel_z = z * 0.001f;
-}
-
-// --- Public API ---
-bool CustomSensorManager::begin() {
-  Serial.println("[Sensors] CustomSensorManager::begin() - starting LIS2DH12");
-
-  _lis2dh_ok = _lis2dh_init();
-
-  if (_lis2dh_ok) {
-    Serial.println("[Sensors] Active: LIS2DH12=YES");
-    // Do initial read
-    loop();
-    return true;
-  }
-  Serial.println("[Sensors] WARNING: No sensors could be initialized");
-  return false;
-}
-
-float CustomSensorManager::getAltitudeMeters() const {
-  return 0.0f;
-}
-
 bool CustomSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
-  if (_lis2dh_ok) {
-    telemetry.addAccelerometer(1, _accel_x, _accel_y, _accel_z);
-  }
   return true;
 }
 
 void CustomSensorManager::loop() {
-  if (_lis2dh_ok) {
-    _lis2dh_read();
-  }
 }
 
 #else  // !CUSTOM_BOARD - legacy GPS path

@@ -10,7 +10,6 @@
 | LoRa | E22-400MM22S (SX1268) |
 | 屏幕 | 240x285 TFT |
 | 电量计 | CW2015CHBD (I2C 0x62) |
-| 加速度计 | LIS2DH12TR (I2C 0x18) |
 | 实时时钟 | BM8563EMA (I2C 0x51) |
 | 按钮 | GPIO0 (G0) + GPIO45 |
 | 蜂鸣器 | 被动蜂鸣器 (GPIO3) |
