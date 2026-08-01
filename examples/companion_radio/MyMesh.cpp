@@ -883,6 +883,13 @@ void MyMesh::begin(bool has_display) {
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
+
+#ifdef ENABLE_REPEATER_MODE
+  next_advert_time = futureMillis(5000); // first advert 5 seconds after boot
+  MESH_DEBUG_PRINTLN("Repeater mode enabled, first advert scheduled in 5s");
+#else
+  next_advert_time = 0;
+#endif
 }
 
 const char *MyMesh::getNodeName() {
@@ -1941,6 +1948,20 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+#ifdef ENABLE_REPEATER_MODE
+  // Auto-send advertisement periodically for repeater mode
+  if (next_advert_time && millisHasNowPassed(next_advert_time)) {
+    bool ok = advert();
+    if (ok) {
+      MESH_DEBUG_PRINTLN("Repeater: periodic advert sent successfully, next in 2min");
+      next_advert_time = futureMillis(120000); // every 2 minutes
+    } else {
+      MESH_DEBUG_PRINTLN("Repeater: advert failed, retry in 30s");
+      next_advert_time = futureMillis(30000);
+    }
+  }
+#endif
+
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
 #endif
@@ -1954,9 +1975,11 @@ bool MyMesh::advert() {
     pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
   }
   if (pkt) {
+    MESH_DEBUG_PRINTLN("Repeater: advert packet created, payload_len=%d, sending...", pkt->payload_len);
     sendZeroHop(pkt);
     return true;
   } else {
+    MESH_DEBUG_PRINTLN("Repeater: advert packet creation failed (packet pool empty?)");
     return false;
   }
 }

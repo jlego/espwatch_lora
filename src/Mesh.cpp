@@ -12,7 +12,11 @@ void Mesh::loop() {
 }
 
 bool Mesh::allowPacketForward(const mesh::Packet* packet) { 
+#ifdef ENABLE_REPEATER_MODE
+  return true;   // Repeater mode enabled via build flag
+#else
   return false;  // by default, Transport NOT enabled
+#endif
 }
 uint32_t Mesh::getRetransmitDelay(const mesh::Packet* packet) { 
   uint32_t t = (_radio->getEstAirtimeFor(packet->getRawLength()) * 52 / 50) / 2;

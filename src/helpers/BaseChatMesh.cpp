@@ -20,7 +20,11 @@ mesh::Packet* BaseChatMesh::createSelfAdvert(const char* name) {
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
   uint8_t app_data_len;
   {
+#ifdef ENABLE_REPEATER_MODE
+    AdvertDataBuilder builder(ADV_TYPE_REPEATER, name);
+#else
     AdvertDataBuilder builder(ADV_TYPE_CHAT, name);
+#endif
     app_data_len = builder.encodeTo(app_data);
   }
 
@@ -31,7 +35,11 @@ mesh::Packet* BaseChatMesh::createSelfAdvert(const char* name, double lat, doubl
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
   uint8_t app_data_len;
   {
+#ifdef ENABLE_REPEATER_MODE
+    AdvertDataBuilder builder(ADV_TYPE_REPEATER, name, lat, lon);
+#else
     AdvertDataBuilder builder(ADV_TYPE_CHAT, name, lat, lon);
+#endif
     app_data_len = builder.encodeTo(app_data);
   }
 
