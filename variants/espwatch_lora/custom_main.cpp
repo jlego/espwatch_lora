@@ -866,7 +866,15 @@ void update_settings_list() {
                 make_field_value(lst_settings, "v1.0");
                 
                 char buf[32];
+#if defined(LLCC68_RADIO)
+                snprintf(buf, sizeof(buf), "LLCC68 %.1f MHz", LORA_FREQ);
+#elif defined(SX1268_RADIO)
                 snprintf(buf, sizeof(buf), "SX1268 %.1f MHz", LORA_FREQ);
+#elif defined(SX1262_RADIO)
+                snprintf(buf, sizeof(buf), "SX1262 %.1f MHz", LORA_FREQ);
+#else
+                snprintf(buf, sizeof(buf), "LoRa %.1f MHz", LORA_FREQ);
+#endif
                 make_field_label(lst_settings, "Radio");
                 make_field_value(lst_settings, buf);
                 

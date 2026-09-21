@@ -9,6 +9,10 @@
 #include <sys/time.h>
 #include <Wire.h>
 
+#if defined(BOARD_HAS_PSRAM) && defined(P_LORA_TX_LED)
+  #undef P_LORA_TX_LED
+#endif
+
 class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;

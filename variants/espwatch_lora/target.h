@@ -7,8 +7,10 @@
   #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #elif defined(SX1268_RADIO)
   #include <helpers/radiolib/CustomSX1268Wrapper.h>
+#elif defined(LLCC68_RADIO)
+  #include <helpers/radiolib/CustomLLCC68Wrapper.h>
 #else
-  #error "Radio type not defined! Use SX1262_RADIO or SX1268_RADIO"
+  #error "Radio type not defined! Use SX1262_RADIO, SX1268_RADIO or LLCC68_RADIO"
 #endif
 
 #ifdef CUSTOM_BOARD

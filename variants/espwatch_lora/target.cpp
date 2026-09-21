@@ -262,6 +262,8 @@ bool radio_init() {
   Serial.println("[LoRa] Calling radio.std_init(SX1262)...");
 #elif defined(SX1268_RADIO)
   Serial.println("[LoRa] Calling radio.std_init(SX1268)...");
+#elif defined(LLCC68_RADIO)
+  Serial.println("[LoRa] Calling radio.std_init(LLCC68)...");
 #endif
 
   bool rc = radio.std_init(&spi);
@@ -272,6 +274,8 @@ bool radio_init() {
     Serial.println("[LoRa] SX1262 initialized successfully");
 #elif defined(SX1268_RADIO)
     Serial.println("[LoRa] SX1268 initialized successfully");
+#elif defined(LLCC68_RADIO)
+    Serial.println("[LoRa] LLCC68 initialized successfully");
 #endif
     // PA config is now handled in CustomSX1268::std_init()
   } else {
@@ -279,6 +283,8 @@ bool radio_init() {
     Serial.println("[LoRa] ERROR: SX1262 initialization failed!");
 #elif defined(SX1268_RADIO)
     Serial.println("[LoRa] ERROR: SX1268 initialization failed!");
+#elif defined(LLCC68_RADIO)
+    Serial.println("[LoRa] ERROR: LLCC68 initialization failed!");
 #endif
     Serial.printf("[LoRa] Debug: BUSY final level=%s\n",
                   digitalRead(P_LORA_BUSY) == HIGH ? "HIGH" : "LOW");
